@@ -13,7 +13,7 @@ public class ConnectionHandler implements Runnable {
         this.clientSocket = clientSocket;
     }
 
-  
+    @Override
     public void run() {
         try (InputStream in = clientSocket.getInputStream();
              OutputStream out = clientSocket.getOutputStream()) {
@@ -32,8 +32,6 @@ public class ConnectionHandler implements Runnable {
                 }
 
                 accumulator.write(chunk, 0, bytesRead);
-                System.out.println("Read " + bytesRead + " bytes this call, "
-                        + accumulator.size() + " bytes accumulated so far");
 
                 String soFar = accumulator.toString();
                 if (soFar.contains("\r\n\r\n")) {
@@ -42,9 +40,23 @@ public class ConnectionHandler implements Runnable {
             }
 
             String fullRequestText = accumulator.toString();
-            System.out.println("==== FULL REQUEST HEADERS RECEIVED ====");
-            System.out.println(fullRequestText);
-            System.out.println("========================================");
+
+            // Trim off everything from the blank line onward for now (no body handling yet)
+            String headersOnly = fullRequestText.split("\r\n\r\n")[0];
+
+            HttpRequest request;
+            try {
+                request = HttpRequestParser.parser(headersOnly);
+            } catch (IllegalArgumentException e) {
+                System.out.println("Failed to parse request: " + e.getMessage());
+                out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes());
+                out.flush();
+                return;
+            }
+
+            System.out.println("==== PARSED REQUEST ====");
+            System.out.println(request);
+            System.out.println("=========================");
 
             out.write("hello\n".getBytes());
             out.flush();
