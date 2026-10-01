@@ -15,6 +15,8 @@ public class ConnectionHandler implements Runnable {
 
     @Override
     public void run() {
+        try { clientSocket.setSoTimeout(5000); } catch (java.net.SocketException ignored) {}
+        
         try (InputStream in = clientSocket.getInputStream();
              OutputStream out = clientSocket.getOutputStream()) {
 
@@ -55,6 +57,7 @@ public class ConnectionHandler implements Runnable {
             }
 
             System.out.println("==== PARSED REQUEST ====");
+            try { Thread.sleep(10); } catch (InterruptedException ignored) {}
             System.out.println(request);
             System.out.println("=========================");
 
