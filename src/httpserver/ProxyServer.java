@@ -10,20 +10,29 @@ import java.util.concurrent.Executors;
  * Entry point for forward-proxy mode. Runs on its own port (default 8888) so it
  * never touches the teammates' Server / ConnectionHandler code.
  *
- * Usage: java httpserver.ProxyServer [port]
+ * Usage: java httpserver.ProxyServer [port] [cacheCapacity]
  */
 public class ProxyServer {
     private static final int DEFAULT_PORT = 8888;
+    private static final int DEFAULT_CACHE_CAPACITY = 100;
 
     public static void main(String[] args) throws IOException {
         int port = args.length >= 1 ? Integer.parseInt(args[0]) : DEFAULT_PORT;
+        int capacity = args.length >= 2 ? Integer.parseInt(args[1]) : DEFAULT_CACHE_CAPACITY;
+
+        LruCache<String, ProxyResponse> cache = new LruCache<>(capacity);
         ExecutorService pool = Executors.newCachedThreadPool();
 
+        // Ctrl+C prints the cache statistics.
+        Runtime.getRuntime().addShutdownHook(new Thread(() ->
+                System.out.println("Cache stats: " + cache.stats())));
+
         try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Forward proxy listening on port " + port);
+            System.out.println("Forward proxy listening on port " + port
+                    + " (cache capacity " + capacity + " entries)");
             while (true) {
                 Socket client = serverSocket.accept();
-                pool.execute(new ProxyHandler(client));
+                pool.execute(new ProxyHandler(client, cache));
             }
         }
     }
