@@ -6,11 +6,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 
 public class ConnectionHandler implements Runnable {
-    private final Socket clientSocket;
-    private static StaticFileHandler fileHandler;
+    private static final int MAX_HEADER_BYTES = 8192;
 
+    private static StaticFileHandler fileHandler;
     static {
         try {
             fileHandler = new StaticFileHandler("www");
@@ -18,6 +19,8 @@ public class ConnectionHandler implements Runnable {
             throw new RuntimeException("Failed to initialize document root", e);
         }
     }
+
+    private final Socket clientSocket;
 
     public ConnectionHandler(Socket clientSocket) {
         this.clientSocket = clientSocket;
@@ -28,61 +31,29 @@ public class ConnectionHandler implements Runnable {
         try (InputStream in = clientSocket.getInputStream();
              OutputStream out = clientSocket.getOutputStream()) {
 
-            ByteArrayOutputStream accumulator = new ByteArrayOutputStream();
-            byte[] chunk = new byte[1024];
-            boolean headersComplete = false;
+            boolean includeBody = true;
+            HttpResponse response;
 
-            while (!headersComplete) {
-                int bytesRead = in.read(chunk);
-                if (bytesRead == -1) {
-                    System.out.println("Client closed connection before headers were complete");
-                    return;
-                }
-                accumulator.write(chunk, 0, bytesRead);
-                if (accumulator.toString().contains("\r\n\r\n")) {
-                    headersComplete = true;
-                }
-            }
-
-            String headersOnly = accumulator.toString().split("\r\n\r\n")[0];
-
-            HttpRequest request;
             try {
-                request = HttpRequestParser.parser(headersOnly);
-            } catch (IllegalArgumentException e) {
-                sendStatusOnly(out, "400 Bad Request");
-                return;
+                String headerBlock = readHeaderBlock(in);
+                if (headerBlock == null) {
+                    return; // client hung up before sending a full request
+                }
+                HttpRequest request = HttpRequestParser.parse(headerBlock);
+                includeBody = !request.getMethod().equals("HEAD");
+                System.out.println("Request: " + request.getMethod() + " " + request.getPath());
+                response = buildResponse(request);
+
+            } catch (HttpParseException e) {
+                response = HttpResponse.error(e.getStatusCode(), e.getReason());
+            } catch (IOException e) {
+                throw e; // network problem: let the outer handler deal with it
+            } catch (Exception e) {
+                System.err.println("Unexpected error: " + e);
+                response = HttpResponse.error(500, "Internal Server Error");
             }
 
-            System.out.println("Request: " + request.getMethod() + " " + request.getPath());
-
-            String method = request.getMethod();
-            if (!method.equals("GET") && !method.equals("HEAD")) {
-                sendStatusOnly(out, "405 Method Not Allowed");
-                return;
-            }
-
-            File file = fileHandler.resolveFile(request.getPath());
-            if (file == null) {
-                sendStatusOnly(out, "404 Not Found");
-                return;
-            }
-
-            byte[] body = fileHandler.readFile(file);
-            String mimeType = fileHandler.getMimeType(file);
-
-            StringBuilder headerBuilder = new StringBuilder();
-            headerBuilder.append("HTTP/1.1 200 OK\r\n");
-            headerBuilder.append("Content-Type: ").append(mimeType).append("\r\n");
-            headerBuilder.append("Content-Length: ").append(body.length).append("\r\n");
-            headerBuilder.append("\r\n");
-
-            out.write(headerBuilder.toString().getBytes());
-
-            if (method.equals("GET")) {
-                out.write(body); // HEAD gets headers only, no body
-            }
-            out.flush();
+            response.write(out, includeBody);
 
         } catch (IOException e) {
             System.err.println("Error handling connection: " + e.getMessage());
@@ -94,9 +65,59 @@ public class ConnectionHandler implements Runnable {
         }
     }
 
-    private void sendStatusOnly(OutputStream out, String statusLine) throws IOException {
-        String response = "HTTP/1.1 " + statusLine + "\r\nContent-Length: 0\r\n\r\n";
-        out.write(response.getBytes());
-        out.flush();
+    /** Buffering layer: accumulate until \r\n\r\n, with a hard size cap. Returns null if client closed early. */
+    private String readHeaderBlock(InputStream in) throws IOException {
+        ByteArrayOutputStream accumulator = new ByteArrayOutputStream();
+        byte[] chunk = new byte[1024];
+
+        while (true) {
+            int bytesRead = in.read(chunk);
+            if (bytesRead == -1) {
+                return null;
+            }
+            accumulator.write(chunk, 0, bytesRead);
+
+            String soFar = accumulator.toString(StandardCharsets.ISO_8859_1);
+            int end = soFar.indexOf("\r\n\r\n");
+            if (end != -1) {
+                if (end > MAX_HEADER_BYTES) {
+                    throw new HttpParseException(431, "Request Header Fields Too Large");
+                }
+                return soFar.substring(0, end);
+            }
+            if (accumulator.size() > MAX_HEADER_BYTES) {
+                throw new HttpParseException(431, "Request Header Fields Too Large");
+            }
+        }
+    }
+
+    private HttpResponse buildResponse(HttpRequest request) throws IOException {
+        String method = request.getMethod();
+        if (!method.equals("GET") && !method.equals("HEAD")) {
+            return HttpResponse.error(405, "Method Not Allowed").header("Allow", "GET, HEAD");
+        }
+
+        File file = fileHandler.resolveFile(request.getPath());
+        if (file == null) {
+            return HttpResponse.error(404, "Not Found");
+        }
+
+        // HTTP dates only have 1-second resolution, so truncate before comparing
+        long lastModified = file.lastModified() / 1000 * 1000;
+        String lastModifiedHeader = HttpResponse.formatHttpDate(lastModified);
+
+        String ifModifiedSince = request.getHeader("If-Modified-Since");
+        if (ifModifiedSince != null) {
+            long clientDate = HttpResponse.parseHttpDate(ifModifiedSince);
+            if (clientDate != -1 && lastModified <= clientDate) {
+                return new HttpResponse(304, "Not Modified")
+                        .header("Last-Modified", lastModifiedHeader);
+            }
+        }
+
+        return new HttpResponse(200, "OK")
+                .header("Content-Type", fileHandler.getMimeType(file))
+                .header("Last-Modified", lastModifiedHeader)
+                .body(fileHandler.readFile(file));
     }
 }
