@@ -108,9 +108,9 @@ public class ProxyCacheTest {
         twice("max-age=60 is cached", url("t1", "cc", "max-age=60"), "MISS", "HIT", 1);
         twice("no-store is never cached", url("t2", "cc", "no-store"), "MISS", "MISS", 2);
         twice("private is not cached by a shared proxy", url("t3", "cc", "private, max-age=60"), "MISS", "MISS", 2);
-        twice("no-cache + ETag is stored but never served unchecked", url("t4", "cc", "no-cache", "etag", "v1"), "MISS", "MISS", 2);
+        twice("no-cache + ETag is stored but must be revalidated every time", url("t4", "cc", "no-cache", "etag", "v1"), "MISS", "REVALIDATED", 2);
         twice("s-maxage=60 beats max-age=0", url("t5", "cc", "max-age=0, s-maxage=60"), "MISS", "HIT", 1);
-        twice("max-age=0 is not served from cache", url("t6", "cc", "max-age=0", "etag", "v1"), "MISS", "MISS", 2);
+        twice("max-age=0 + ETag is revalidated, never served unchecked", url("t6", "cc", "max-age=0", "etag", "v1"), "MISS", "REVALIDATED", 2);
         twice("no headers at all: nothing to cache", url("t7"), "MISS", "MISS", 2);
         twice("Vary responses are not cached", url("t8", "cc", "max-age=60", "vary", "Accept-Encoding"), "MISS", "MISS", 2);
         twice("500 is not cached even with max-age", url("t9", "status", "500", "cc", "max-age=60"), "MISS", "MISS", 2);
@@ -217,6 +217,137 @@ public class ProxyCacheTest {
         Resp huge1 = get(url("t27", "cc", "max-age=60", "size", "1100000"));
         Resp huge2 = get(url("t27", "cc", "max-age=60", "size", "1100000"));
         check("bodies over 1 MB are relayed but not cached", huge1.body.length() == 1100000 && "MISS".equals(huge2.xcache()));
+
+
+        System.out.println("Revalidation with ETag (stale entry -> If-None-Match -> 304)");
+        u = url("v1", "cc", "max-age=1", "etag", "v1");
+        Resp m1 = get(u);
+        Resp m2 = get(u);
+        Thread.sleep(1200);
+        int reqs0 = origin.requestCount();
+        int cond0 = origin.conditionalCount();
+        int nm0 = origin.notModifiedCount();
+        Resp m3 = get(u);
+        Resp m4 = get(u);
+        check("expired entry with an ETag is revalidated and the client still gets a normal 200",
+                "MISS".equals(m1.xcache()) && "HIT".equals(m2.xcache())
+                        && "REVALIDATED".equals(m3.xcache()) && m3.status == 200);
+        check("origin saw exactly one conditional request and answered 304",
+                origin.requestCount() - reqs0 == 1 && origin.conditionalCount() - cond0 == 1
+                        && origin.notModifiedCount() - nm0 == 1);
+        check("the cached body is reused (not downloaded again)", m3.body.equals(m1.body));
+        check("freshness restarts after revalidation (next request is a HIT)", "HIT".equals(m4.xcache()));
+
+        u = url("v2", "cc", "max-age=1", "etag", "v1|v2");
+        Resp c1 = get(u);
+        Thread.sleep(1200);
+        Resp c2 = get(u);
+        Resp c3 = get(u);
+        check("resource changed: origin answers a new 200 instead of 304 (MISS, new body, new ETag)",
+                "MISS".equals(c2.xcache()) && c2.status == 200 && !c2.body.equals(c1.body)
+                        && "\"v2\"".equals(c2.headers.get("etag")));
+        check("the new version replaced the old one in the cache", "HIT".equals(c3.xcache()) && c3.body.equals(c2.body));
+
+        u = url("v3", "cc", "max-age=1", "lm", "3600");
+        get(u);
+        Thread.sleep(1200);
+        nm0 = origin.notModifiedCount();
+        Resp l2 = get(u);
+        check("revalidation also works with Last-Modified / If-Modified-Since",
+                "REVALIDATED".equals(l2.xcache()) && origin.notModifiedCount() - nm0 == 1);
+
+        u = url("v4", "cc", "max-age=1|max-age=60", "etag", "v1");
+        get(u);
+        Thread.sleep(1200);
+        Resp h2 = get(u);
+        Thread.sleep(1200);
+        Resp h3 = get(u);
+        check("headers of the 304 (new Cache-Control: max-age=60) replace the stored ones",
+                "REVALIDATED".equals(h2.xcache()) && "HIT".equals(h3.xcache()));
+
+        u = url("v5", "cc", "max-age=60", "etag", "v1");
+        get(u);
+        nm0 = origin.notModifiedCount();
+        Resp nc = get(u, "Cache-Control: no-cache");
+        check("client no-cache + stored ETag: origin is asked, body is not downloaded again",
+                "REVALIDATED".equals(nc.xcache()) && origin.notModifiedCount() - nm0 == 1);
+
+        u = url("v6", "cc", "max-age=1", "etag", "v1", "status", "200|500|200");
+        Resp e1 = get(u);
+        Thread.sleep(1200);
+        Resp e2 = get(u);
+        Resp e3 = get(u);
+        check("origin error (500) during revalidation is passed on, and the stored copy is kept",
+                e2.status == 500 && "MISS".equals(e2.xcache())
+                        && "REVALIDATED".equals(e3.xcache()) && e3.status == 200 && e3.body.equals(e1.body));
+
+        System.out.println("Client conditional requests (proxy answers 304 itself)");
+        u = url("c1", "cc", "max-age=60", "etag", "v1", "lm", "3600");
+        Resp full = get(u);
+        String lastModified = full.headers.get("last-modified");
+        int o0 = origin.requestCount();
+        Resp a1 = get(u, "If-None-Match: \"v1\"");
+        check("matching If-None-Match gives 304 from the cache: no body, origin not contacted",
+                a1.status == 304 && "HIT".equals(a1.xcache()) && a1.body.isEmpty() && origin.requestCount() == o0);
+        check("the 304 repeats ETag and Cache-Control and carries an Age header",
+                "\"v1\"".equals(a1.headers.get("etag")) && "max-age=60".equals(a1.headers.get("cache-control"))
+                        && a1.headers.get("age") != null);
+        Resp a2 = get(u, "If-None-Match: \"other\"");
+        check("non-matching If-None-Match gives the full 200", a2.status == 200 && a2.body.equals(full.body));
+        check("weak form W/\"v1\" matches (weak comparison)", get(u, "If-None-Match: W/\"v1\"").status == 304);
+        check("a list of ETags, and *, match", get(u, "If-None-Match: \"a\", \"v1\"").status == 304
+                && get(u, "If-None-Match: *").status == 304);
+        check("If-Modified-Since equal to Last-Modified gives 304",
+                get(u, "If-Modified-Since: " + lastModified).status == 304);
+        check("If-Modified-Since older than Last-Modified gives 200",
+                get(u, "If-Modified-Since: Mon, 01 Jan 2001 00:00:00 GMT").status == 200);
+        check("If-None-Match takes precedence over If-Modified-Since",
+                get(u, "If-None-Match: \"other\"", "If-Modified-Since: " + lastModified).status == 200);
+        check("an unparseable If-Modified-Since is ignored", get(u, "If-Modified-Since: yesterday").status == 200);
+        check("HEAD with a matching validator gives 304 as well",
+                send(proxyPort, "HEAD", u, "If-None-Match: \"v1\"").status == 304);
+
+        u = url("c2", "cc", "max-age=60", "etag", "v1");
+        cond0 = origin.conditionalCount();
+        Resp mm = get(u, "If-None-Match: \"v1\"");
+        check("client conditional on an uncached URL goes to the origin; its 304 is relayed",
+                mm.status == 304 && "MISS".equals(mm.xcache()) && origin.conditionalCount() - cond0 == 1);
+        Resp mm2 = get(u);
+        Resp mm3 = get(u);
+        check("a relayed 304 stores nothing; the next full response is cached (MISS, HIT)",
+                "MISS".equals(mm2.xcache()) && "HIT".equals(mm3.xcache()));
+
+        u = url("c3", "cc", "max-age=1", "etag", "v1");
+        get(u);
+        Thread.sleep(1200);
+        Resp s1 = get(u, "If-None-Match: \"bogus\"");
+        check("stale entry + client validator that does not match: proxy revalidates with ITS ETag, client gets the 200",
+                "REVALIDATED".equals(s1.xcache()) && s1.status == 200 && !s1.body.isEmpty());
+        Thread.sleep(1200);
+        Resp s2 = get(u, "If-None-Match: \"v1\"");
+        check("stale entry + matching client validator: revalidated, then 304 to the client",
+                "REVALIDATED".equals(s2.xcache()) && s2.status == 304);
+
+        u = url("w1", "cc", "max-age=60", "etag", "W/\"w1\"");
+        get(u);
+        check("a weak ETag in the cache matches a strong If-None-Match (weak comparison)",
+                get(u, "If-None-Match: \"w1\"").status == 304);
+
+        System.out.println("HEAD revalidation");
+        u = url("h1", "cc", "max-age=1", "etag", "v1");
+        get(u);
+        Thread.sleep(1200);
+        Resp hd = send(proxyPort, "HEAD", u);
+        Resp hg = get(u);
+        check("HEAD on a stale entry revalidates (no body) and refreshes it for the next GET",
+                "REVALIDATED".equals(hd.xcache()) && hd.body.isEmpty() && "HIT".equals(hg.xcache()) && !hg.body.isEmpty());
+        u = url("h2", "cc", "max-age=1", "etag", "v1|v2");
+        get(u);
+        Thread.sleep(1200);
+        Resp hd2 = send(proxyPort, "HEAD", u);
+        Resp hg2 = get(u);
+        check("HEAD that reveals a change drops the old copy; next GET fetches the new version",
+                "MISS".equals(hd2.xcache()) && "MISS".equals(hg2.xcache()) && "\"v2\"".equals(hg2.headers.get("etag")));
 
         System.out.println("LRU eviction through the proxy (capacity 2)");
         ServerSocket smallSocket = new ServerSocket(0);

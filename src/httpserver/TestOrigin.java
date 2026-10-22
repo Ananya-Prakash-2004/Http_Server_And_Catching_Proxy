@@ -18,12 +18,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * A tiny origin server for testing the proxy. It builds each response from
  * query-string parameters, so one URL decides exactly what headers come back.
  *
- *   status=404             status code (default 200)
+ *   status=404             status code (default 200); "200|500|200" = a different status per request
  *   cc=max-age%3D60        Cache-Control value. "a|b|c" = a on the 1st request for this
  *                          exact URL, b on the 2nd, c from the 3rd on ("" = no header)
  *   expires=60             Expires header, N seconds from now (negative = in the past)
  *   expiresraw=0           Expires header with this literal text
- *   etag=v1                ETag (quoted for you)          lm=3600  Last-Modified = server start minus N s
+ *   etag=v1                ETag (quoted for you); "v1|v2" = v1 on the 1st request, v2 afterwards (a change)
+ *   lm=3600                Last-Modified = server start minus N seconds
  *   vary=Accept-Encoding   Vary header                    cookie=a%3D1  Set-Cookie header
  *   delay=200              wait N ms before replying      size=5000  pad the body to N bytes
  *
@@ -37,6 +38,8 @@ public final class TestOrigin {
     private final ServerSocket serverSocket;
     private final long startMs = (System.currentTimeMillis() / 1000) * 1000;
     private final AtomicInteger totalRequests = new AtomicInteger();
+    private final AtomicInteger conditionalRequests = new AtomicInteger();
+    private final AtomicInteger notModifiedReplies = new AtomicInteger();
     private final Map<String, AtomicInteger> perUrl = new ConcurrentHashMap<>();
     private final boolean quiet;
 
@@ -55,6 +58,16 @@ public final class TestOrigin {
     /** Number of requests that actually reached this origin. */
     public int requestCount() {
         return totalRequests.get();
+    }
+
+    /** Requests that carried If-None-Match or If-Modified-Since. */
+    public int conditionalCount() {
+        return conditionalRequests.get();
+    }
+
+    /** 304 replies this origin has sent. */
+    public int notModifiedCount() {
+        return notModifiedReplies.get();
     }
 
     public void serve() {
@@ -113,7 +126,8 @@ public final class TestOrigin {
             int n = totalRequests.incrementAndGet();
             int k = perUrl.computeIfAbsent(target, x -> new AtomicInteger()).incrementAndGet();
 
-            int status = Integer.parseInt(p.getOrDefault("status", "200"));
+            String[] statusSeq = p.getOrDefault("status", "200").split("\\|");
+            int status = Integer.parseInt(statusSeq[Math.min(k - 1, statusSeq.length - 1)]);
             long now = System.currentTimeMillis();
 
             // Cache-Control, optionally a different value per successive request for this URL
@@ -123,7 +137,11 @@ public final class TestOrigin {
                 cc = seq[Math.min(k - 1, seq.length - 1)];
             }
 
-            String etag = p.get("etag");
+            String etag = null;
+            if (p.containsKey("etag")) {
+                String[] seq = p.get("etag").split("\\|");
+                etag = seq[Math.min(k - 1, seq.length - 1)];
+            }
             if (etag != null && !etag.startsWith("\"") && !etag.startsWith("W/")) {
                 etag = "\"" + etag + "\"";
             }
@@ -148,8 +166,12 @@ public final class TestOrigin {
                     notModified = ims != null && ims >= lmMs;
                 }
             }
+            if (conditional) {
+                conditionalRequests.incrementAndGet();
+            }
             if (notModified) {
                 status = 304;
+                notModifiedReplies.incrementAndGet();
             }
 
             int delay = Integer.parseInt(p.getOrDefault("delay", "0"));

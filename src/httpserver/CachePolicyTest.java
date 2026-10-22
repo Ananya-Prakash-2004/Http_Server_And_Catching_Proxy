@@ -14,6 +14,10 @@ public class CachePolicyTest {
         System.out.println("  ok - " + message);
     }
 
+    static void check(String message, boolean condition) {
+        check(condition, message);
+    }
+
     static ProxyResponse resp(int status, String... headerPairs) {
         List<String[]> h = new ArrayList<>();
         for (int i = 0; i < headerPairs.length; i += 2) {
@@ -84,6 +88,46 @@ public class CachePolicyTest {
         check(e.isFresh(NOW + 5_000, 10), "entry younger than the client's max-age is acceptable");
         check(!e.isFresh(NOW + 15_000, 10), "entry older than the client's max-age is refused");
         check(!e.isFresh(NOW, 0), "client max-age=0 always forces a refetch");
+
+
+        System.out.println("Client conditional matching");
+        ProxyResponse v = resp(200, "ETag", "\"v1\"", "Last-Modified", HttpDates.format(NOW - 5_000_000L));
+        check(CachePolicy.clientConditionMatches("\"v1\"", null, v), "If-None-Match with the same ETag matches");
+        check(!CachePolicy.clientConditionMatches("\"v2\"", null, v), "different ETag does not match");
+        check(CachePolicy.clientConditionMatches("W/\"v1\"", null, v), "weak comparison: W/\"v1\" matches \"v1\"");
+        check(CachePolicy.clientConditionMatches("\"a\", \"b\", \"v1\"", null, v), "ETag list is searched");
+        check(CachePolicy.clientConditionMatches("*", null, v), "* matches any existing representation");
+        check(CachePolicy.clientConditionMatches("\"x,y\", \"v1\"", null, v), "a comma inside a quoted ETag does not break the list");
+        check(CachePolicy.clientConditionMatches("\"x,v1\"", null, resp(200, "ETag", "\"x,v1\"")), "ETag containing a comma matches itself");
+        check(!CachePolicy.clientConditionMatches("\"v1\"", null, resp(200)), "no ETag on our side: no match");
+        check(CachePolicy.clientConditionMatches(null, HttpDates.format(NOW), v), "If-Modified-Since after Last-Modified matches");
+        check(CachePolicy.clientConditionMatches(null, HttpDates.format(NOW - 5_000_000L), v), "If-Modified-Since equal to Last-Modified matches");
+        check(!CachePolicy.clientConditionMatches(null, HttpDates.format(NOW - 6_000_000L), v), "older If-Modified-Since does not match");
+        check(!CachePolicy.clientConditionMatches(null, "garbage", v), "unparseable date is ignored");
+        check(!CachePolicy.clientConditionMatches("\"v2\"", HttpDates.format(NOW), v), "If-None-Match wins over If-Modified-Since");
+        check(!CachePolicy.clientConditionMatches("\"v1\"", null, resp(404, "ETag", "\"v1\"")), "only a 200 can become a 304");
+
+        System.out.println("Building a 304 and merging one into a stored response");
+        ProxyResponse stored = new ProxyResponse(200, "OK", List.of(
+                new String[]{"Content-Type", "text/plain"}, new String[]{"ETag", "\"v1\""},
+                new String[]{"Cache-Control", "max-age=1"}, new String[]{"Age", "40"},
+                new String[]{"X-Custom", "keep me"}), "hello".getBytes(), 5);
+        ProxyResponse nm = new ProxyResponse(304, "Not Modified", List.of(
+                new String[]{"Cache-Control", "max-age=60"}, new String[]{"Date", "Mon, 01 Jan 2029 00:00:00 GMT"}),
+                new byte[0], -1);
+        ProxyResponse merged = stored.withHeadersFrom(nm);
+        check("304's Cache-Control replaces the stored one", "max-age=60".equals(merged.getHeader("cache-control")));
+        check("headers the 304 does not mention are kept", "keep me".equals(merged.getHeader("x-custom"))
+                && "\"v1\"".equals(merged.getHeader("etag")));
+        check("the stored Age is dropped", merged.getHeader("age") == null);
+        check("status and body stay those of the stored response", merged.getStatusCode() == 200 && merged.bodySize() == 5);
+        ProxyResponse n304 = ProxyResponse.notModifiedFrom(stored);
+        check("generated 304 has status 304 and no body", n304.getStatusCode() == 304 && n304.bodySize() == 0);
+        check("generated 304 keeps ETag and Cache-Control, drops Content-Type",
+                n304.getHeader("etag") != null && n304.getHeader("cache-control") != null && n304.getHeader("content-type") == null);
+        String wire = new String(n304.toBytes(true, "HIT", 7), java.nio.charset.StandardCharsets.ISO_8859_1);
+        check("304 on the wire has Age and no Content-Length",
+                wire.startsWith("HTTP/1.1 304 Not Modified") && wire.contains("Age: 7") && !wire.contains("Content-Length"));
 
         System.out.println("\nAll CachePolicy tests passed.");
     }

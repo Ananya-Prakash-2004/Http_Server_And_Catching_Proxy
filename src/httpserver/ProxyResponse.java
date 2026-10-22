@@ -1,7 +1,11 @@
 package httpserver;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * An origin response that has been fully read and parsed: status line, headers
@@ -25,6 +29,43 @@ public final class ProxyResponse {
         this.headers = List.copyOf(headers);
         this.body = body;
         this.declaredLength = declaredLength;
+    }
+
+    /** Headers a 304 should repeat from the 200 it stands in for (RFC 7232 section 4.1). */
+    private static final Set<String> NOT_MODIFIED_HEADERS = Set.of(
+            "cache-control", "content-location", "date", "etag", "expires", "last-modified", "vary");
+
+    /**
+     * Returns a copy of this stored response whose headers are updated from a 304 Not Modified
+     * (RFC 7234 section 4.3.4): every header the 304 carries replaces the stored header of the
+     * same name. The stored Age is always dropped, because the response was just revalidated.
+     * Status and body stay those of the stored response.
+     */
+    public ProxyResponse withHeadersFrom(ProxyResponse notModified) {
+        Set<String> replaced = new HashSet<>();
+        replaced.add("age");
+        for (String[] h : notModified.headers) {
+            replaced.add(h[0].toLowerCase(Locale.ROOT));
+        }
+        List<String[]> merged = new ArrayList<>();
+        for (String[] h : headers) {
+            if (!replaced.contains(h[0].toLowerCase(Locale.ROOT))) {
+                merged.add(h);
+            }
+        }
+        merged.addAll(notModified.headers);
+        return new ProxyResponse(statusCode, reason, merged, body, declaredLength);
+    }
+
+    /** A "304 Not Modified" standing in for the given full response: right headers, no body. */
+    public static ProxyResponse notModifiedFrom(ProxyResponse full) {
+        List<String[]> kept = new ArrayList<>();
+        for (String[] h : full.headers) {
+            if (NOT_MODIFIED_HEADERS.contains(h[0].toLowerCase(Locale.ROOT))) {
+                kept.add(h);
+            }
+        }
+        return new ProxyResponse(304, "Not Modified", kept, new byte[0], -1);
     }
 
     public int getStatusCode() {
