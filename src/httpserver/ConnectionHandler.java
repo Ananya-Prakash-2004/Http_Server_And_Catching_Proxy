@@ -1,15 +1,15 @@
 package httpserver;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
+import java.net.SocketTimeoutException;
 
 public class ConnectionHandler implements Runnable {
-    private static final int MAX_HEADER_BYTES = 8192;
+    private static final int IDLE_TIMEOUT_MS = 5000;
+    private static final int MAX_REQUESTS_PER_CONNECTION = 100;
 
     private static StaticFileHandler fileHandler;
     static {
@@ -31,30 +31,51 @@ public class ConnectionHandler implements Runnable {
         try (InputStream in = clientSocket.getInputStream();
              OutputStream out = clientSocket.getOutputStream()) {
 
-            boolean includeBody = true;
-            HttpResponse response;
+            clientSocket.setSoTimeout(IDLE_TIMEOUT_MS);
+            RequestReader reader = new RequestReader(in);
+            int served = 0;
 
-            try {
-                String headerBlock = readHeaderBlock(in);
-                if (headerBlock == null) {
-                    return; // client hung up before sending a full request
+            while (served < MAX_REQUESTS_PER_CONNECTION) {
+                boolean includeBody = true;
+                boolean keepAlive = false;
+                HttpResponse response;
+
+                try {
+                    String headerBlock = reader.readHeaderBlock();
+                    if (headerBlock == null) {
+                        break;
+                    }
+                    HttpRequest request = HttpRequestParser.parse(headerBlock);
+                    System.out.println("Request: " + request.getMethod() + " " + request.getPath());
+
+                    includeBody = !request.getMethod().equals("HEAD");
+                    response = buildResponse(request);
+
+                    boolean lastAllowed = (served + 1 >= MAX_REQUESTS_PER_CONNECTION);
+                    keepAlive = wantsKeepAlive(request)
+                            && isGetOrHead(request)
+                            && !hasRequestBody(request)
+                            && !lastAllowed;
+
+                } catch (HttpParseException e) {
+                    response = HttpResponse.error(e.getStatusCode(), e.getReason());
+                } catch (IOException e) {
+                    throw e;
+                } catch (Exception e) {
+                    System.err.println("Unexpected error: " + e);
+                    response = HttpResponse.error(500, "Internal Server Error");
                 }
-                HttpRequest request = HttpRequestParser.parse(headerBlock);
-                includeBody = !request.getMethod().equals("HEAD");
-                System.out.println("Request: " + request.getMethod() + " " + request.getPath());
-                response = buildResponse(request);
 
-            } catch (HttpParseException e) {
-                response = HttpResponse.error(e.getStatusCode(), e.getReason());
-            } catch (IOException e) {
-                throw e; // network problem: let the outer handler deal with it
-            } catch (Exception e) {
-                System.err.println("Unexpected error: " + e);
-                response = HttpResponse.error(500, "Internal Server Error");
+                response.write(out, includeBody, keepAlive);
+                served++;
+
+                if (!keepAlive) {
+                    break;
+                }
             }
 
-            response.write(out, includeBody);
-
+        } catch (SocketTimeoutException e) {
+            System.out.println("Idle timeout, closing connection " + clientSocket.getRemoteSocketAddress());
         } catch (IOException e) {
             System.err.println("Error handling connection: " + e.getMessage());
         } finally {
@@ -65,30 +86,23 @@ public class ConnectionHandler implements Runnable {
         }
     }
 
-    /** Buffering layer: accumulate until \r\n\r\n, with a hard size cap. Returns null if client closed early. */
-    private String readHeaderBlock(InputStream in) throws IOException {
-        ByteArrayOutputStream accumulator = new ByteArrayOutputStream();
-        byte[] chunk = new byte[1024];
-
-        while (true) {
-            int bytesRead = in.read(chunk);
-            if (bytesRead == -1) {
-                return null;
-            }
-            accumulator.write(chunk, 0, bytesRead);
-
-            String soFar = accumulator.toString(StandardCharsets.ISO_8859_1);
-            int end = soFar.indexOf("\r\n\r\n");
-            if (end != -1) {
-                if (end > MAX_HEADER_BYTES) {
-                    throw new HttpParseException(431, "Request Header Fields Too Large");
-                }
-                return soFar.substring(0, end);
-            }
-            if (accumulator.size() > MAX_HEADER_BYTES) {
-                throw new HttpParseException(431, "Request Header Fields Too Large");
-            }
+    private boolean wantsKeepAlive(HttpRequest request) {
+        String header = request.getHeader("Connection");
+        String tokens = (header == null) ? "" : header.toLowerCase();
+        if (request.getVersion().equals("HTTP/1.1")) {
+            return !tokens.contains("close");
         }
+        return tokens.contains("keep-alive");
+    }
+
+    private boolean isGetOrHead(HttpRequest request) {
+        return request.getMethod().equals("GET") || request.getMethod().equals("HEAD");
+    }
+
+    private boolean hasRequestBody(HttpRequest request) {
+        String length = request.getHeader("Content-Length");
+        boolean hasLength = length != null && !length.trim().equals("0");
+        return hasLength || request.getHeader("Transfer-Encoding") != null;
     }
 
     private HttpResponse buildResponse(HttpRequest request) throws IOException {
@@ -102,7 +116,6 @@ public class ConnectionHandler implements Runnable {
             return HttpResponse.error(404, "Not Found");
         }
 
-        // HTTP dates only have 1-second resolution, so truncate before comparing
         long lastModified = file.lastModified() / 1000 * 1000;
         String lastModifiedHeader = HttpResponse.formatHttpDate(lastModified);
 

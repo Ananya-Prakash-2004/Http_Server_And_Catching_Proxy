@@ -14,8 +14,6 @@ import java.util.Map;
 
 public class HttpResponse {
 
-    // DateTimeFormatter is immutable and thread-safe (SimpleDateFormat is NOT),
-    // so one shared instance is safe across all connection threads.
     private static final DateTimeFormatter HTTP_DATE =
             DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
                     .withZone(ZoneOffset.UTC);
@@ -40,7 +38,6 @@ public class HttpResponse {
         return this;
     }
 
-    /** Convenience for error responses with a small plain-text body. */
     public static HttpResponse error(int code, String reason) {
         return new HttpResponse(code, reason)
                 .header("Content-Type", "text/plain; charset=utf-8")
@@ -51,7 +48,6 @@ public class HttpResponse {
         return HTTP_DATE.format(Instant.ofEpochMilli(epochMillis));
     }
 
-    /** Returns epoch millis, or -1 if the value isn't a valid HTTP date. */
     public static long parseHttpDate(String value) {
         try {
             return ZonedDateTime.parse(value.trim(), HTTP_DATE).toInstant().toEpochMilli();
@@ -60,11 +56,11 @@ public class HttpResponse {
         }
     }
 
-    /**
-     * Writes the full response. For HEAD, pass includeBody=false: headers
-     * (including the Content-Length GET would have returned) are sent, body is not.
-     */
     public void write(OutputStream out, boolean includeBody) throws IOException {
+        write(out, includeBody, false);
+    }
+
+    public void write(OutputStream out, boolean includeBody, boolean keepAlive) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 ").append(statusCode).append(' ').append(reason).append("\r\n");
         sb.append("Date: ").append(formatHttpDate(System.currentTimeMillis())).append("\r\n");
@@ -77,7 +73,7 @@ public class HttpResponse {
         if (bodyAllowed) {
             sb.append("Content-Length: ").append(body.length).append("\r\n");
         }
-        sb.append("Connection: close\r\n"); // Phase 6 will make this conditional
+        sb.append("Connection: ").append(keepAlive ? "keep-alive" : "close").append("\r\n");
         sb.append("\r\n");
 
         out.write(sb.toString().getBytes(StandardCharsets.ISO_8859_1));
