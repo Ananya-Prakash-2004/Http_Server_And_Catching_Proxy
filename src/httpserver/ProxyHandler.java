@@ -1,6 +1,5 @@
 package httpserver;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -34,7 +33,6 @@ public class ProxyHandler implements Runnable {
     private static final int CLIENT_TIMEOUT_MS = 10_000;
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int ORIGIN_READ_TIMEOUT_MS = 10_000;
-    private static final int MAX_HEADER_BYTES = 64 * 1024;
     private static final int MAX_CACHEABLE_BYTES = 1024 * 1024; // don't cache bodies over 1 MB
 
     // Request headers that must not be forwarded (hop-by-hop, RFC 7230 section 6.1).
@@ -46,8 +44,17 @@ public class ProxyHandler implements Runnable {
     private static final Set<String> CLIENT_CONDITIONALS = Set.of(
             "if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range");
 
+    /** Per-request log lines on the console. The benchmark switches this off. */
+    public static volatile boolean verbose = true;
+
     private final Socket clientSocket;
     private final LruCache<String, CacheEntry> cache;
+
+    private static void log(String message) {
+        if (verbose) {
+            System.out.println(message);
+        }
+    }
 
     public ProxyHandler(Socket clientSocket, LruCache<String, CacheEntry> cache) {
         this.clientSocket = clientSocket;
@@ -62,17 +69,20 @@ public class ProxyHandler implements Runnable {
 
             client.setSoTimeout(CLIENT_TIMEOUT_MS);
 
-            String headerText = readHeaderBlock(in);
-            if (headerText == null) {
-                return; // client closed or sent nothing usable
-            }
-
+            // The team's RequestReader buffers bytes until the blank line that ends the headers,
+            // and HttpRequestParser turns that text into an HttpRequest.
             HttpRequest request;
             try {
-                request = HttpRequestParser.parser(headerText);
-            } catch (IllegalArgumentException e) {
-                sendError(out, 400, "Bad Request");
+                String headerText = new RequestReader(in).readHeaderBlock();
+                if (headerText == null) {
+                    return; // client closed the connection without sending anything
+                }
+                request = HttpRequestParser.parse(headerText);
+            } catch (HttpParseException e) {
+                sendError(out, e.getStatusCode(), e.getReason()); // 400, 414, 431, 505
                 return;
+            } catch (SocketTimeoutException e) {
+                return; // client connected but sent nothing in time
             }
 
             String method = request.getMethod();
@@ -138,7 +148,7 @@ public class ProxyHandler implements Runnable {
             why = "BYPASS (client sent no-cache)";
         } else if (entry.isFresh(now, reqMaxAge)) {
             long age = entry.currentAgeSeconds(now);
-            System.out.println("CACHE HIT  " + method + " " + key + " (age " + age
+            log("CACHE HIT  " + method + " " + key + " (age " + age
                     + "s, fresh for " + entry.getFreshnessLifetimeSeconds() + "s)");
             ProxyStats.HITS.incrementAndGet();
             respond(out, request, entry.getResponse(), headOnly, "HIT", age);
@@ -156,7 +166,7 @@ public class ProxyHandler implements Runnable {
         // 2. Go to the origin. If we hold a copy with a validator, make the request conditional.
         boolean canRevalidate = entry != null && (entry.getEtag() != null || entry.getLastModified() != null);
         String[] validators = canRevalidate ? new String[]{entry.getEtag(), entry.getLastModified()} : null;
-        System.out.println("CACHE " + why + " " + method + " " + key
+        log("CACHE " + why + " " + method + " " + key
                 + (canRevalidate ? "  -> revalidating with the origin" : ""));
 
         ProxyResponse fromOrigin = fetchFromOrigin(out, request, method, host, port, originPath, validators);
@@ -175,7 +185,7 @@ public class ProxyHandler implements Runnable {
             } else {
                 cache.remove(key); // the 304 turned out to carry no-store etc.
             }
-            System.out.println("  origin said 304 Not Modified: cached body reused, freshness restarted");
+            log("  origin said 304 Not Modified: cached body reused, freshness restarted");
             ProxyStats.REVALIDATED.incrementAndGet();
             respond(out, request, merged, headOnly, "REVALIDATED",
                     refreshed != null ? refreshed.currentAgeSeconds(received) : 0);
@@ -224,7 +234,7 @@ public class ProxyHandler implements Runnable {
                          boolean headOnly, String xCache, long ageSeconds) throws IOException {
         if (CachePolicy.clientConditionMatches(request.getHeader("if-none-match"),
                 request.getHeader("if-modified-since"), response)) {
-            System.out.println("  client's validator matches: sending 304 Not Modified");
+            log("  client's validator matches: sending 304 Not Modified");
             ProxyStats.NOT_MODIFIED_SENT.incrementAndGet();
             out.write(ProxyResponse.notModifiedFrom(response).toBytes(true, xCache, ageSeconds));
         } else {
@@ -303,32 +313,6 @@ public class ProxyHandler implements Runnable {
         }
         sb.append("Connection: close\r\n\r\n");
         return sb.toString();
-    }
-
-    /** Reads until \r\n\r\n; returns the header text without the blank line, or null. */
-    private String readHeaderBlock(InputStream in) throws IOException {
-        ByteArrayOutputStream acc = new ByteArrayOutputStream();
-        byte[] chunk = new byte[1024];
-        while (true) {
-            int n;
-            try {
-                n = in.read(chunk);
-            } catch (SocketTimeoutException e) {
-                return null;
-            }
-            if (n == -1) {
-                return null;
-            }
-            acc.write(chunk, 0, n);
-            String text = acc.toString(StandardCharsets.ISO_8859_1);
-            int end = text.indexOf("\r\n\r\n");
-            if (end != -1) {
-                return text.substring(0, end);
-            }
-            if (acc.size() > MAX_HEADER_BYTES) {
-                return null;
-            }
-        }
     }
 
     private void sendError(OutputStream out, int code, String reason) throws IOException {
