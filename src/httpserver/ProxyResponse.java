@@ -39,6 +39,21 @@ public final class ProxyResponse {
         return headers;
     }
 
+    /** All values of a header joined with ", " (right for Cache-Control sent as several lines), or null. */
+    public String getHeaderJoined(String name) {
+        StringBuilder sb = null;
+        for (String[] h : headers) {
+            if (h[0].equalsIgnoreCase(name)) {
+                if (sb == null) {
+                    sb = new StringBuilder(h[1]);
+                } else {
+                    sb.append(", ").append(h[1]);
+                }
+            }
+        }
+        return sb == null ? null : sb.toString();
+    }
+
     public int bodySize() {
         return body.length;
     }
@@ -60,10 +75,21 @@ public final class ProxyResponse {
      * @param xCache   value for an X-Cache header ("HIT"/"MISS"), or null for none
      */
     public byte[] toBytes(boolean headOnly, String xCache) {
+        return toBytes(headOnly, xCache, -1);
+    }
+
+    /** As above; ageSeconds >= 0 adds an Age header (replacing any stored one), -1 adds none. */
+    public byte[] toBytes(boolean headOnly, String xCache, long ageSeconds) {
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 ").append(statusCode).append(' ').append(reason).append("\r\n");
         for (String[] h : headers) {
+            if (ageSeconds >= 0 && h[0].equalsIgnoreCase("age")) {
+                continue;
+            }
             sb.append(h[0]).append(": ").append(h[1]).append("\r\n");
+        }
+        if (ageSeconds >= 0) {
+            sb.append("Age: ").append(ageSeconds).append("\r\n");
         }
         if (declaredLength >= 0) {
             sb.append("Content-Length: ").append(declaredLength).append("\r\n");

@@ -14,16 +14,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Forward proxy handler (Step 2: response parsing + LRU cache).
+ * Forward proxy handler (Step 3: Cache-Control and freshness).
  *
- * Flow: read request -> parse -> look in the cache -> on a miss, fetch the whole
- * response from the origin (ResponseReader), store it, and send it to the client.
- * Every response carries an "X-Cache: HIT" or "X-Cache: MISS" header so caching
- * is easy to see in tests and benchmarks.
+ * Flow: read request -> parse -> look in the cache -> serve if the entry is fresh,
+ * otherwise fetch the whole response from the origin (ResponseReader), decide
+ * with CachePolicy whether it may be stored, and send it to the client.
+ * Every response carries "X-Cache: HIT" or "X-Cache: MISS" so caching is easy to
+ * see in tests and benchmarks; cached responses also carry an Age header.
  *
- * NOTE: the caching rule here is deliberately crude (any 200 response to a GET is
- * stored forever, until LRU evicts it). Step 3 replaces it with Cache-Control
- * handling and expiry; Step 4 adds ETag / conditional GET.
+ * Stale entries are simply refetched in full for now. Step 4 turns that refetch
+ * into a conditional request (If-None-Match / If-Modified-Since) so the origin
+ * can answer 304 Not Modified.
  */
 public class ProxyHandler implements Runnable {
 
@@ -39,9 +40,9 @@ public class ProxyHandler implements Runnable {
             "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate");
 
     private final Socket clientSocket;
-    private final LruCache<String, ProxyResponse> cache;
+    private final LruCache<String, CacheEntry> cache;
 
-    public ProxyHandler(Socket clientSocket, LruCache<String, ProxyResponse> cache) {
+    public ProxyHandler(Socket clientSocket, LruCache<String, CacheEntry> cache) {
         this.clientSocket = clientSocket;
         this.cache = cache;
     }
@@ -100,25 +101,63 @@ public class ProxyHandler implements Runnable {
 
             String key = cacheKey(host, port, originPath);
 
+            // --- What does the client's own Cache-Control say? ---
+            long now = System.currentTimeMillis();
+            CacheControl reqCc = CacheControl.parse(request.getHeader("cache-control"));
+            // "Pragma: no-cache" is the HTTP/1.0 spelling; it only counts if there is no Cache-Control.
+            boolean pragmaNoCache = request.getHeader("cache-control") == null
+                    && request.getHeader("pragma") != null
+                    && request.getHeader("pragma").toLowerCase().contains("no-cache");
+            boolean bypass = reqCc.has("no-cache") || pragmaNoCache; // client wants a fresh copy
+            boolean reqNoStore = reqCc.has("no-store");
+            long reqMaxAge = reqCc.seconds("max-age");               // -1 if absent
+            boolean hasAuthorization = request.getHeader("authorization") != null;
+
             // 1. Cache lookup (a HEAD can be answered from a cached GET: same resource).
-            ProxyResponse cached = cache.get(key);
-            if (cached != null) {
-                System.out.println("CACHE HIT  " + method + " " + key);
-                out.write(cached.toBytes(headOnly, "HIT"));
+            CacheEntry entry = cache.get(key);
+            String reason;
+            if (entry == null) {
+                reason = "MISS";
+                ProxyStats.MISSES.incrementAndGet();
+            } else if (bypass) {
+                reason = "BYPASS (client sent no-cache)";
+                ProxyStats.BYPASS.incrementAndGet();
+            } else if (entry.isFresh(now, reqMaxAge)) {
+                long age = entry.currentAgeSeconds(now);
+                System.out.println("CACHE HIT  " + method + " " + key + " (age " + age
+                        + "s, fresh for " + entry.getFreshnessLifetimeSeconds() + "s)");
+                ProxyStats.HITS.incrementAndGet();
+                out.write(entry.getResponse().toBytes(headOnly, "HIT", age));
                 out.flush();
+                return;
+            } else {
+                reason = "STALE";
+                ProxyStats.STALE.incrementAndGet();
+            }
+
+            // "only-if-cached": the client forbids contacting the origin (RFC 7234 5.2.1.7).
+            if (reqCc.has("only-if-cached")) {
+                sendError(out, 504, "Gateway Timeout");
                 return;
             }
 
-            // 2. Miss: fetch from the origin.
-            System.out.println("CACHE MISS " + method + " " + key);
+            // 2. Fetch from the origin.
+            System.out.println("CACHE " + reason + " " + method + " " + key);
             ProxyResponse fresh = fetchFromOrigin(out, request, method, host, port, originPath);
             if (fresh == null) {
                 return; // an error response was already sent to the client
             }
 
-            // 3. Store (crude rule for now; Step 3 replaces this).
-            if (!headOnly && fresh.getStatusCode() == 200 && fresh.bodySize() <= MAX_CACHEABLE_BYTES) {
-                cache.put(key, fresh);
+            // 3. Store it if the rules allow (never for HEAD, or if the client said no-store).
+            //    A response that may not be stored also removes any older copy of the URL,
+            //    except 5xx errors, which say nothing about the older copy.
+            if (!headOnly && !reqNoStore && fresh.getStatusCode() < 500) {
+                CacheEntry toStore = CachePolicy.evaluate(fresh, hasAuthorization, System.currentTimeMillis());
+                if (toStore != null && fresh.bodySize() <= MAX_CACHEABLE_BYTES) {
+                    cache.put(key, toStore);
+                } else {
+                    cache.remove(key);
+                }
             }
 
             out.write(fresh.toBytes(headOnly, "MISS"));
