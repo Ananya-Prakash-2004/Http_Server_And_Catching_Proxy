@@ -9,7 +9,7 @@ public class HttpRequest {
     public String getMethod(){
         return method;
     }
-    public void setmethod(String method){
+    public void setMethod(String method){
         this.method=method;
     }
     public String getPath(){
