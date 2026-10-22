@@ -1,11 +1,13 @@
 package httpserver;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.nio.charset.StandardCharsets;
 
 public class ConnectionHandler implements Runnable {
     private static final int IDLE_TIMEOUT_MS = 5000;
@@ -111,6 +113,10 @@ public class ConnectionHandler implements Runnable {
             return HttpResponse.error(405, "Method Not Allowed").header("Allow", "GET, HEAD");
         }
 
+        if (request.getPath().equals("/stream")) {
+            return streamDemo(request);
+        }
+
         File file = fileHandler.resolveFile(request.getPath());
         if (file == null) {
             return HttpResponse.error(404, "Not Found");
@@ -132,5 +138,39 @@ public class ConnectionHandler implements Runnable {
                 .header("Content-Type", fileHandler.getMimeType(file))
                 .header("Last-Modified", lastModifiedHeader)
                 .body(fileHandler.readFile(file));
+    }
+
+    /** Demo of an unknown-length body: 5 pieces, one every half second. */
+    private HttpResponse streamDemo(HttpRequest request) throws IOException {
+        int[] sent = {0};
+        HttpResponse.ChunkSource source = () -> {
+            if (sent[0] >= 5) {
+                return null;
+            }
+            sent[0]++;
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+            return ("Chunk " + sent[0] + " of 5\n").getBytes(StandardCharsets.UTF_8);
+        };
+
+        // HTTP/1.0 clients can't decode chunked, so gather the pieces and send a normal body
+        if (request.getVersion().equals("HTTP/1.0")) {
+            ByteArrayOutputStream all = new ByteArrayOutputStream();
+            byte[] part;
+            while ((part = source.next()) != null) {
+                all.write(part);
+            }
+            return new HttpResponse(200, "OK")
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(all.toByteArray());
+        }
+
+        return new HttpResponse(200, "OK")
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .chunked(source);
     }
 }
