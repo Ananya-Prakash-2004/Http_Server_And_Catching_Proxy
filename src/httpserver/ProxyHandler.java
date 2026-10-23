@@ -30,7 +30,8 @@ import java.util.Set;
  */
 public class ProxyHandler implements Runnable {
 
-    private static final int CLIENT_TIMEOUT_MS = 10_000;
+    private static final int IDLE_TIMEOUT_MS = 5_000;            // how long an idle client connection is kept open
+    private static final int MAX_REQUESTS_PER_CONNECTION = 100;  // same limits as the team's ConnectionHandler
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int ORIGIN_READ_TIMEOUT_MS = 10_000;
     private static final int MAX_CACHEABLE_BYTES = 1024 * 1024; // don't cache bodies over 1 MB
@@ -67,65 +68,105 @@ public class ProxyHandler implements Runnable {
              InputStream in = client.getInputStream();
              OutputStream out = client.getOutputStream()) {
 
-            client.setSoTimeout(CLIENT_TIMEOUT_MS);
+            client.setSoTimeout(IDLE_TIMEOUT_MS);
 
-            // The team's RequestReader buffers bytes until the blank line that ends the headers,
-            // and HttpRequestParser turns that text into an HttpRequest.
-            HttpRequest request;
-            try {
-                String headerText = new RequestReader(in).readHeaderBlock();
-                if (headerText == null) {
-                    return; // client closed the connection without sending anything
+            // One RequestReader per connection: it buffers bytes until the blank line that ends the
+            // headers and keeps any extra bytes for the next request on the same connection.
+            RequestReader reader = new RequestReader(in);
+            int served = 0;
+
+            while (served < MAX_REQUESTS_PER_CONNECTION) {
+                HttpRequest request;
+                try {
+                    String headerText = reader.readHeaderBlock();
+                    if (headerText == null) {
+                        break; // client closed the connection
+                    }
+                    request = HttpRequestParser.parse(headerText);
+                } catch (HttpParseException e) {
+                    sendError(out, e.getStatusCode(), e.getReason()); // 400, 414, 431, 505
+                    break;
+                } catch (SocketTimeoutException e) {
+                    break; // idle for too long: close
                 }
-                request = HttpRequestParser.parse(headerText);
-            } catch (HttpParseException e) {
-                sendError(out, e.getStatusCode(), e.getReason()); // 400, 414, 431, 505
-                return;
-            } catch (SocketTimeoutException e) {
-                return; // client connected but sent nothing in time
-            }
+                served++;
 
-            String method = request.getMethod();
-            if (!method.equals("GET") && !method.equals("HEAD")) {
-                sendError(out, 405, "Method Not Allowed");
-                return;
-            }
-            boolean headOnly = method.equals("HEAD");
+                boolean keepAlive = wantsKeepAlive(request)
+                        && !hasRequestBody(request)
+                        && served < MAX_REQUESTS_PER_CONNECTION;
 
-            // A proxy receives absolute-form targets: GET http://host:port/path HTTP/1.1
-            URI target;
-            try {
-                target = new URI(request.getPath());
-            } catch (URISyntaxException e) {
-                sendError(out, 400, "Bad Request");
-                return;
+                boolean connectionReusable = serve(out, request, keepAlive);
+                if (!keepAlive || !connectionReusable) {
+                    break;
+                }
             }
-            if (target.getScheme() == null || !target.getScheme().equalsIgnoreCase("http")
-                    || target.getHost() == null) {
-                sendError(out, 400, "Bad Request");
-                return;
-            }
-
-            String host = target.getHost();
-            int port = target.getPort() == -1 ? 80 : target.getPort();
-            String originPath = target.getRawPath();
-            if (originPath == null || originPath.isEmpty()) {
-                originPath = "/";
-            }
-            if (target.getRawQuery() != null) {
-                originPath += "?" + target.getRawQuery();
-            }
-
-            handle(out, request, method, headOnly, host, port, originPath,
-                    cacheKey(host, port, originPath));
 
         } catch (IOException e) {
             System.err.println("Proxy connection error: " + e.getMessage());
         }
     }
 
-    private void handle(OutputStream out, HttpRequest request, String method, boolean headOnly,
-                        String host, int port, String originPath, String key) throws IOException {
+    /**
+     * Answers one parsed request.
+     *
+     * @return true if a normal response was sent (the connection may be reused), false if an
+     *         error response was sent (the connection is closed)
+     */
+    private boolean serve(OutputStream out, HttpRequest request, boolean keepAlive) throws IOException {
+        String method = request.getMethod();
+        if (!method.equals("GET") && !method.equals("HEAD")) {
+            sendError(out, 405, "Method Not Allowed");
+            return false;
+        }
+        boolean headOnly = method.equals("HEAD");
+
+        // A proxy receives absolute-form targets: GET http://host:port/path HTTP/1.1
+        URI target;
+        try {
+            target = new URI(request.getPath());
+        } catch (URISyntaxException e) {
+            sendError(out, 400, "Bad Request");
+            return false;
+        }
+        if (target.getScheme() == null || !target.getScheme().equalsIgnoreCase("http")
+                || target.getHost() == null) {
+            sendError(out, 400, "Bad Request");
+            return false;
+        }
+
+        String host = target.getHost();
+        int port = target.getPort() == -1 ? 80 : target.getPort();
+        String originPath = target.getRawPath();
+        if (originPath == null || originPath.isEmpty()) {
+            originPath = "/";
+        }
+        if (target.getRawQuery() != null) {
+            originPath += "?" + target.getRawQuery();
+        }
+
+        return handle(out, request, method, headOnly, host, port, originPath,
+                cacheKey(host, port, originPath), keepAlive);
+    }
+
+    // Same rules as the team's ConnectionHandler.
+    private static boolean wantsKeepAlive(HttpRequest request) {
+        String header = request.getHeader("connection");
+        String tokens = header == null ? "" : header.toLowerCase();
+        if ("HTTP/1.1".equals(request.getVersion())) {
+            return !tokens.contains("close");
+        }
+        return tokens.contains("keep-alive");
+    }
+
+    private static boolean hasRequestBody(HttpRequest request) {
+        String length = request.getHeader("content-length");
+        boolean hasLength = length != null && !length.trim().equals("0");
+        return hasLength || request.getHeader("transfer-encoding") != null;
+    }
+
+    private boolean handle(OutputStream out, HttpRequest request, String method, boolean headOnly,
+                           String host, int port, String originPath, String key,
+                           boolean keepAlive) throws IOException {
 
         // --- What does the client's own Cache-Control say? ---
         long now = System.currentTimeMillis();
@@ -151,8 +192,8 @@ public class ProxyHandler implements Runnable {
             log("CACHE HIT  " + method + " " + key + " (age " + age
                     + "s, fresh for " + entry.getFreshnessLifetimeSeconds() + "s)");
             ProxyStats.HITS.incrementAndGet();
-            respond(out, request, entry.getResponse(), headOnly, "HIT", age);
-            return;
+            respond(out, request, entry.getResponse(), headOnly, "HIT", age, keepAlive);
+            return true;
         } else {
             why = "STALE";
         }
@@ -160,7 +201,7 @@ public class ProxyHandler implements Runnable {
         // "only-if-cached": the client forbids contacting the origin (RFC 7234 5.2.1.7).
         if (reqCc.has("only-if-cached")) {
             sendError(out, 504, "Gateway Timeout");
-            return;
+            return false;
         }
 
         // 2. Go to the origin. If we hold a copy with a validator, make the request conditional.
@@ -171,7 +212,7 @@ public class ProxyHandler implements Runnable {
 
         ProxyResponse fromOrigin = fetchFromOrigin(out, request, method, host, port, originPath, validators);
         if (fromOrigin == null) {
-            return; // an error response was already sent to the client
+            return false; // an error response was already sent to the client
         }
         long received = System.currentTimeMillis();
         int status = fromOrigin.getStatusCode();
@@ -188,16 +229,16 @@ public class ProxyHandler implements Runnable {
             log("  origin said 304 Not Modified: cached body reused, freshness restarted");
             ProxyStats.REVALIDATED.incrementAndGet();
             respond(out, request, merged, headOnly, "REVALIDATED",
-                    refreshed != null ? refreshed.currentAgeSeconds(received) : 0);
-            return;
+                    refreshed != null ? refreshed.currentAgeSeconds(received) : 0, keepAlive);
+            return true;
         }
 
         // 3b. A 304 here answers the client's own conditional request (we did not revalidate): relay it.
         if (status == 304) {
             ProxyStats.MISSES.incrementAndGet();
-            out.write(fromOrigin.toBytes(headOnly, "MISS"));
+            out.write(fromOrigin.toBytes(headOnly, "MISS", -1, keepAlive));
             out.flush();
-            return;
+            return true;
         }
 
         // 3c. A full response. Store it if the rules allow (never for HEAD, or if the client said no-store).
@@ -219,11 +260,12 @@ public class ProxyHandler implements Runnable {
 
         if (canRevalidate) {
             // we replaced the client's conditionals when asking the origin, so check them ourselves
-            respond(out, request, fromOrigin, headOnly, "MISS", -1);
+            respond(out, request, fromOrigin, headOnly, "MISS", -1, keepAlive);
         } else {
-            out.write(fromOrigin.toBytes(headOnly, "MISS")); // the origin already saw the client's conditionals
+            out.write(fromOrigin.toBytes(headOnly, "MISS", -1, keepAlive)); // the origin already saw the client's conditionals
             out.flush();
         }
+        return true;
     }
 
     /**
@@ -231,14 +273,14 @@ public class ProxyHandler implements Runnable {
      * If-None-Match / If-Modified-Since say the client already has this version.
      */
     private void respond(OutputStream out, HttpRequest request, ProxyResponse response,
-                         boolean headOnly, String xCache, long ageSeconds) throws IOException {
+                         boolean headOnly, String xCache, long ageSeconds, boolean keepAlive) throws IOException {
         if (CachePolicy.clientConditionMatches(request.getHeader("if-none-match"),
                 request.getHeader("if-modified-since"), response)) {
             log("  client's validator matches: sending 304 Not Modified");
             ProxyStats.NOT_MODIFIED_SENT.incrementAndGet();
-            out.write(ProxyResponse.notModifiedFrom(response).toBytes(true, xCache, ageSeconds));
+            out.write(ProxyResponse.notModifiedFrom(response).toBytes(true, xCache, ageSeconds, keepAlive));
         } else {
-            out.write(response.toBytes(headOnly, xCache, ageSeconds));
+            out.write(response.toBytes(headOnly, xCache, ageSeconds, keepAlive));
         }
         out.flush();
     }

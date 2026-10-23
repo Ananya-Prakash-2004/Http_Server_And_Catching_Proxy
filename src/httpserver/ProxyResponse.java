@@ -121,6 +121,11 @@ public final class ProxyResponse {
 
     /** As above; ageSeconds >= 0 adds an Age header (replacing any stored one), -1 adds none. */
     public byte[] toBytes(boolean headOnly, String xCache, long ageSeconds) {
+        return toBytes(headOnly, xCache, ageSeconds, false);
+    }
+
+    /** As above; keepAlive true announces that the connection stays open for the next request. */
+    public byte[] toBytes(boolean headOnly, String xCache, long ageSeconds, boolean keepAlive) {
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 ").append(statusCode).append(' ').append(reason).append("\r\n");
         for (String[] h : headers) {
@@ -138,7 +143,7 @@ public final class ProxyResponse {
         if (xCache != null) {
             sb.append("X-Cache: ").append(xCache).append("\r\n");
         }
-        sb.append("Connection: close\r\n\r\n");
+        sb.append(keepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n");
 
         byte[] head = sb.toString().getBytes(StandardCharsets.ISO_8859_1);
         if (headOnly || body.length == 0) {

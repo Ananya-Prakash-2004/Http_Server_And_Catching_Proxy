@@ -1,6 +1,8 @@
 package httpserver;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLEncoder;
@@ -53,7 +55,7 @@ public class ProxyCacheTest {
     static Resp send(int port, String method, String url, String... extraHeaders) throws IOException {
         try (Socket s = new Socket("localhost", port)) {
             s.setSoTimeout(15000);
-            StringBuilder req = new StringBuilder(method + " " + url + " HTTP/1.1\r\nHost: test\r\n");
+            StringBuilder req = new StringBuilder(method + " " + url + " HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
             for (String h : extraHeaders) {
                 req.append(h).append("\r\n");
             }
@@ -87,6 +89,155 @@ public class ProxyCacheTest {
         check(name + "  [" + first + " then " + second + ", origin contacted " + originHits + "x]",
                 first.equals(a.xcache()) && second.equals(b.xcache())
                         && origin.requestCount() - before == originHits);
+    }
+
+
+    /** Reads exactly one response from a persistent connection (framed by Content-Length). Null at EOF. */
+    static Resp readOne(InputStream in, boolean headRequest) throws IOException {
+        ByteArrayOutputStream head = new ByteArrayOutputStream();
+        int[] pattern = {'\r', '\n', '\r', '\n'};
+        int matched = 0;
+        int b;
+        while ((b = in.read()) != -1) {
+            head.write(b);
+            if (b == pattern[matched]) {
+                if (++matched == 4) {
+                    break;
+                }
+            } else {
+                matched = b == '\r' ? 1 : 0;
+            }
+        }
+        if (matched < 4) {
+            return null;
+        }
+        String[] lines = new String(head.toByteArray(), StandardCharsets.ISO_8859_1).split("\r\n");
+        Resp r = new Resp();
+        r.status = Integer.parseInt(lines[0].split(" ")[1]);
+        for (int i = 1; i < lines.length; i++) {
+            int c = lines[i].indexOf(':');
+            if (c > 0) {
+                r.headers.put(lines[i].substring(0, c).trim().toLowerCase(), lines[i].substring(c + 1).trim());
+            }
+        }
+        String cl = r.headers.get("content-length");
+        if (!headRequest && r.status != 304 && r.status != 204 && cl != null) {
+            r.body = new String(in.readNBytes(Integer.parseInt(cl)), StandardCharsets.ISO_8859_1);
+        }
+        return r;
+    }
+
+    static byte[] raw(String method, String url, String version, String... extraHeaders) {
+        StringBuilder sb = new StringBuilder(method + " " + url + " " + version + "\r\nHost: test\r\n");
+        for (String h : extraHeaders) {
+            sb.append(h).append("\r\n");
+        }
+        return sb.append("\r\n").toString().getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    static Socket open() throws IOException {
+        Socket s = new Socket("localhost", proxyPort);
+        s.setSoTimeout(15000);
+        return s;
+    }
+
+    static void keepAliveTests() throws Exception {
+        System.out.println("Persistent connections (keep-alive)");
+        {
+            String ka = url("k1", "cc", "max-age=60", "etag", "v1");
+            int o = origin.requestCount();
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1"));
+                Resp r1 = readOne(s.getInputStream(), false);
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1"));
+                Resp r2 = readOne(s.getInputStream(), false);
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1"));
+                Resp r3 = readOne(s.getInputStream(), false);
+                check("three requests on ONE connection: MISS, HIT, HIT (origin contacted once)",
+                        r1 != null && r2 != null && r3 != null && "MISS".equals(r1.xcache())
+                                && "HIT".equals(r2.xcache()) && "HIT".equals(r3.xcache())
+                                && origin.requestCount() - o == 1);
+                check("responses announce Connection: keep-alive and the bodies are intact",
+                        "keep-alive".equals(r2.headers.get("connection")) && r2.body.equals(r1.body)
+                                && !r1.body.isEmpty());
+
+                // mixed framing on the same connection: HEAD (no body), conditional (304), then a full GET
+                s.getOutputStream().write(raw("HEAD", ka, "HTTP/1.1"));
+                Resp head1 = readOne(s.getInputStream(), true);
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1", "If-None-Match: \"v1\""));
+                Resp nm = readOne(s.getInputStream(), false);
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1"));
+                Resp again = readOne(s.getInputStream(), false);
+                check("HEAD, 304 and full GET share a connection without stray bytes",
+                        head1 != null && head1.body.isEmpty() && nm != null && nm.status == 304
+                                && again != null && again.status == 200 && again.body.equals(r1.body));
+            }
+
+            try (Socket s = open()) {
+                // two requests sent back to back in one write (pipelining)
+                byte[] one = raw("GET", ka, "HTTP/1.1");
+                byte[] both = new byte[one.length * 2];
+                System.arraycopy(one, 0, both, 0, one.length);
+                System.arraycopy(one, 0, both, one.length, one.length);
+                s.getOutputStream().write(both);
+                Resp p1 = readOne(s.getInputStream(), false);
+                Resp p2 = readOne(s.getInputStream(), false);
+                check("pipelined requests are answered in order", p1 != null && p2 != null
+                        && p1.status == 200 && p2.status == 200 && p1.body.equals(p2.body));
+            }
+
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1", "Connection: close"));
+                Resp c = readOne(s.getInputStream(), false);
+                check("Connection: close is honoured (response says close, then EOF)",
+                        c != null && "close".equals(c.headers.get("connection")) && s.getInputStream().read() == -1);
+            }
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.0"));
+                Resp c = readOne(s.getInputStream(), false);
+                check("HTTP/1.0 without keep-alive is closed after one response",
+                        c != null && "close".equals(c.headers.get("connection")) && s.getInputStream().read() == -1);
+            }
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.0", "Connection: keep-alive"));
+                Resp c1 = readOne(s.getInputStream(), false);
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.0", "Connection: keep-alive"));
+                Resp c2 = readOne(s.getInputStream(), false);
+                check("HTTP/1.0 with Connection: keep-alive stays open",
+                        c1 != null && c2 != null && "keep-alive".equals(c1.headers.get("connection")));
+            }
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("GET", ka, "HTTP/1.1", "Content-Length: 5"));
+                s.getOutputStream().write("hello".getBytes(StandardCharsets.ISO_8859_1));
+                Resp c = readOne(s.getInputStream(), false);
+                check("a request that carries a body is answered, then the connection is closed",
+                        c != null && c.status == 200 && "close".equals(c.headers.get("connection")));
+            }
+            try (Socket s = open()) {
+                s.getOutputStream().write(raw("POST", ka, "HTTP/1.1"));
+                Resp e = readOne(s.getInputStream(), false);
+                check("an error response (405) closes the connection",
+                        e != null && e.status == 405 && s.getInputStream().read() == -1);
+            }
+            try (Socket s = open()) {
+                // the 100th request on a connection is answered with Connection: close, like the team's server
+                Resp last = null;
+                boolean allKeepAlive = true;
+                for (int i = 1; i <= 100; i++) {
+                    s.getOutputStream().write(raw("GET", ka, "HTTP/1.1"));
+                    last = readOne(s.getInputStream(), false);
+                    if (last == null) {
+                        break;
+                    }
+                    if (i < 100 && !"keep-alive".equals(last.headers.get("connection"))) {
+                        allKeepAlive = false;
+                    }
+                }
+                check("after 100 requests the proxy closes the connection",
+                        last != null && allKeepAlive && "close".equals(last.headers.get("connection"))
+                                && s.getInputStream().read() == -1);
+            }
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -348,6 +499,9 @@ public class ProxyCacheTest {
         Resp hg2 = get(u);
         check("HEAD that reveals a change drops the old copy; next GET fetches the new version",
                 "MISS".equals(hd2.xcache()) && "MISS".equals(hg2.xcache()) && "\"v2\"".equals(hg2.headers.get("etag")));
+
+
+        keepAliveTests();
 
         System.out.println("LRU eviction through the proxy (capacity 2)");
         ServerSocket smallSocket = new ServerSocket(0);

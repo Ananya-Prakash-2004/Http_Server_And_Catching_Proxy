@@ -6,8 +6,13 @@ import httpserver.ProxyHandler;
 import httpserver.ProxyServer;
 import httpserver.TestOrigin;
 
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -19,6 +24,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -67,7 +73,11 @@ public final class CacheBenchmark {
         int hit, revalidated, miss, errors;
         double meanMs, p50, p95, p99, hitP50, missP50, reqPerSec, idealHitPct, savingPct;
         int originRequests;
+        String errorSummary = "";
     }
+
+    /** Why requests failed, counted over the current run (warmup included). */
+    private final Map<String, Integer> errorReasons = new TreeMap<>();
 
     public static void main(String[] args) throws Exception {
         CacheBenchmark b = new CacheBenchmark();
@@ -171,6 +181,9 @@ public final class CacheBenchmark {
     private Result run(String sweep, int capacity, double s, int ttl, double baselineMeanMs, int think)
             throws Exception {
         boolean direct = capacity == 0;
+        synchronized (errorReasons) {
+            errorReasons.clear();
+        }
         ZipfSampler zipf = new ZipfSampler(objects, s);
         int[] seq = sequences.computeIfAbsent(s, k -> zipf.sequence(warmup + requests, seed));
 
@@ -194,7 +207,7 @@ public final class CacheBenchmark {
             String line = direct
                     ? "GET " + pq + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
                     : "GET http://localhost:" + originPort + pq
-                            + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                            + " HTTP/1.1\r\nHost: localhost\r\n\r\n"; // keep-alive: the connection is reused
             req[id] = line.getBytes(StandardCharsets.ISO_8859_1);
         }
 
@@ -248,6 +261,13 @@ public final class CacheBenchmark {
         r.hitP50 = percentileMs(hits, nHit, 50);
         r.missP50 = percentileMs(misses, nMiss, 50);
         r.savingPct = baselineMeanMs > 0 ? 100.0 * (1 - r.meanMs / baselineMeanMs) : 0;
+        synchronized (errorReasons) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, Integer> e : errorReasons.entrySet()) {
+                sb.append(sb.length() == 0 ? "" : "; ").append(e.getKey()).append(" x").append(e.getValue());
+            }
+            r.errorSummary = sb.toString();
+        }
         return r;
     }
 
@@ -259,23 +279,16 @@ public final class CacheBenchmark {
         Thread[] threads = new Thread[concurrency];
         for (int t = 0; t < concurrency; t++) {
             threads[t] = new Thread(() -> {
+                Conn conn = new Conn(loopback, port, bodyBytes); // one persistent connection per client thread
+                Map<String, Integer> myErrors = new TreeMap<>();
                 int i;
                 while ((i = next.getAndIncrement()) < to) {
                     long start = System.nanoTime();
                     byte kind = ERROR;
-                    try (Socket s = new Socket()) {
-                        s.connect(new InetSocketAddress(loopback, port), 10_000);
-                        s.setSoTimeout(15_000);
-                        s.getOutputStream().write(req[seq[i]]);
-                        s.getOutputStream().flush();
-                        byte[] resp = s.getInputStream().readAllBytes();
-                        String head = new String(resp, 0, Math.min(resp.length, 700), StandardCharsets.ISO_8859_1);
-                        if (head.startsWith("HTTP/1.1 200") && resp.length >= bodyBytes) {
-                            kind = head.contains("X-Cache: HIT") ? HIT
-                                    : head.contains("X-Cache: REVALIDATED") ? REVALIDATED : MISS;
-                        }
+                    try {
+                        kind = conn.fetch(req[seq[i]]);
                     } catch (Exception e) {
-                        // counted as an error below
+                        myErrors.merge(describe(e), 1, Integer::sum);
                     }
                     if (lat != null) {
                         lat[i - from] = System.nanoTime() - start;
@@ -285,15 +298,132 @@ public final class CacheBenchmark {
                         try {
                             Thread.sleep(think);
                         } catch (InterruptedException e) {
-                            return;
+                            break;
                         }
                     }
+                }
+                conn.close();
+                synchronized (errorReasons) {
+                    myErrors.forEach((k, v) -> errorReasons.merge(k, v, Integer::sum));
                 }
             });
             threads[t].start();
         }
         for (Thread th : threads) {
             th.join();
+        }
+    }
+
+    private static String describe(Exception e) {
+        String msg = e.getMessage();
+        if (e instanceof IOException && msg != null && msg.startsWith("HTTP ")) {
+            return msg;
+        }
+        return e.getClass().getSimpleName() + (msg == null ? "" : ": " + msg);
+    }
+
+    /**
+     * A client connection that is reused for many requests, like a browser does (HTTP keep-alive).
+     * It reconnects when the server closes the connection ("Connection: close", the proxy's
+     * 100-request limit, or an idle timeout) and retries once if a reused connection turns out dead.
+     */
+    private static final class Conn {
+        private final InetAddress address;
+        private final int port;
+        private final int bodyBytes;
+        private java.net.Socket socket;
+        private InputStream in;
+        private OutputStream out;
+
+        Conn(InetAddress address, int port, int bodyBytes) {
+            this.address = address;
+            this.port = port;
+            this.bodyBytes = bodyBytes;
+        }
+
+        byte fetch(byte[] request) throws IOException {
+            for (int attempt = 0; ; attempt++) {
+                boolean reused = socket != null;
+                try {
+                    if (socket == null) {
+                        socket = new Socket();
+                        socket.connect(new InetSocketAddress(address, port), 10_000);
+                        socket.setSoTimeout(15_000);
+                        in = new BufferedInputStream(socket.getInputStream(), 8192);
+                        out = socket.getOutputStream();
+                    }
+                    out.write(request);
+                    out.flush();
+                    return readResponse();
+                } catch (IOException e) {
+                    close();
+                    if (reused && attempt == 0 && !(e.getMessage() != null && e.getMessage().startsWith("HTTP "))) {
+                        continue; // the server had closed an idle connection: try again on a fresh one
+                    }
+                    throw e;
+                }
+            }
+        }
+
+        private byte readResponse() throws IOException {
+            ByteArrayOutputStream head = new ByteArrayOutputStream();
+            int[] pattern = {'\r', '\n', '\r', '\n'};
+            int matched = 0;
+            int b;
+            while ((b = in.read()) != -1) {
+                head.write(b);
+                if (b == pattern[matched]) {
+                    if (++matched == 4) {
+                        break;
+                    }
+                } else {
+                    matched = b == '\r' ? 1 : 0;
+                }
+            }
+            if (matched < 4) {
+                throw new IOException("connection closed before a full response arrived");
+            }
+            String h = new String(head.toByteArray(), StandardCharsets.ISO_8859_1);
+            String lower = h.toLowerCase(Locale.ROOT);
+            boolean close = lower.contains("\r\nconnection: close");
+
+            int length = -1;
+            int cl = lower.indexOf("\r\ncontent-length:");
+            if (cl >= 0) {
+                int end = lower.indexOf("\r\n", cl + 2);
+                length = Integer.parseInt(lower.substring(cl + 17, end).trim());
+            }
+            if (length >= 0) {
+                byte[] body = in.readNBytes(length);
+                if (body.length < length) {
+                    throw new IOException("body cut short");
+                }
+            } else if (!h.startsWith("HTTP/1.1 304")) {
+                close = true;
+                in.readAllBytes(); // no length: body runs until the server closes
+            }
+            if (close) {
+                close();
+            }
+            if (!h.startsWith("HTTP/1.1 200")) {
+                throw new IOException("HTTP " + h.substring(9, Math.min(12, h.length())));
+            }
+            if (length < bodyBytes) {
+                throw new IOException("body shorter than expected");
+            }
+            return h.contains("X-Cache: HIT") ? HIT
+                    : h.contains("X-Cache: REVALIDATED") ? REVALIDATED : MISS;
+        }
+
+        void close() {
+            if (socket != null) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                    // nothing to do
+                }
+                socket = null;
+            }
         }
     }
 
@@ -322,6 +452,9 @@ public final class CacheBenchmark {
                 100.0 * r.hit / r.measured, 100.0 * r.revalidated / r.measured, 100.0 * r.miss / r.measured,
                 r.meanMs, r.p50, r.p95, r.p99, r.originRequests, r.savingPct,
                 r.errors > 0 ? "   (" + r.errors + " errors!)" : ""));
+        if (!r.errorSummary.isEmpty()) {
+            System.out.println("          error reasons: " + r.errorSummary);
+        }
     }
 
     private void write(PrintWriter w, Result r) {
