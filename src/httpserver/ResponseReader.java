@@ -40,6 +40,7 @@ public final class ResponseReader {
 
         int status;
         String reason;
+        String httpVersion;
         List<String[]> allHeaders;
 
         // Skip interim 1xx responses (e.g. 100 Continue); a real response follows them.
@@ -59,6 +60,7 @@ public final class ResponseReader {
                 throw new IOException("Malformed status code from origin: " + statusLine);
             }
             reason = parts.length == 3 ? parts[2] : "";
+            httpVersion = parts[0];
 
             allHeaders = new ArrayList<>();
             while (true) {
@@ -84,13 +86,22 @@ public final class ResponseReader {
 
         // Header names listed in "Connection: x, y" are hop-by-hop too.
         Set<String> dropped = new HashSet<>(STRIPPED);
+        boolean closeToken = false;
+        boolean keepAliveToken = false;
         for (String[] h : allHeaders) {
             if (h[0].equalsIgnoreCase("connection")) {
                 for (String token : h[1].split(",")) {
-                    dropped.add(token.trim().toLowerCase(Locale.ROOT));
+                    String t = token.trim().toLowerCase(Locale.ROOT);
+                    dropped.add(t);
+                    closeToken |= t.equals("close");
+                    keepAliveToken |= t.equals("keep-alive");
                 }
             }
         }
+        // HTTP/1.1 connections stay open unless the origin says "close"; HTTP/1.0 ones close unless
+        // the origin says "keep-alive".
+        boolean reusable = !closeToken && status != 101
+                && (httpVersion.equals("HTTP/1.1") || keepAliveToken);
         List<String[]> kept = new ArrayList<>();
         String transferEncoding = null;
         String contentLengthText = null;
@@ -140,9 +151,10 @@ public final class ResponseReader {
         } else {
             body = readUntilEof(in);
             declared = body.length;
+            reusable = false; // the end of the body was the origin closing the connection
         }
 
-        return new ProxyResponse(status, reason, kept, body, declared);
+        return new ProxyResponse(status, reason, kept, body, declared, reusable);
     }
 
     private static byte[] readChunked(InputStream in) throws IOException {

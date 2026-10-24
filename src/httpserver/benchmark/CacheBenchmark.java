@@ -73,6 +73,7 @@ public final class CacheBenchmark {
         int hit, revalidated, miss, errors;
         double meanMs, p50, p95, p99, hitP50, missP50, reqPerSec, idealHitPct, savingPct;
         int originRequests;
+        int originConnections;   // TCP connections the origin had to accept during the measured phase
         String errorSummary = "";
     }
 
@@ -132,7 +133,7 @@ public final class CacheBenchmark {
             if (newFile) {
                 csv.println("sweep,capacity,zipf_s,objects,ttl_s,concurrency,origin_delay_ms,requests,"
                         + "hit_pct,revalidated_pct,miss_pct,mean_ms,p50_ms,p95_ms,p99_ms,hit_p50_ms,miss_p50_ms,"
-                        + "requests_per_sec,origin_requests,ideal_static_hit_pct,latency_saving_pct,errors");
+                        + "requests_per_sec,origin_requests,origin_connections,ideal_static_hit_pct,latency_saving_pct,errors");
             }
 
             // Baseline: no proxy, no cache.
@@ -205,7 +206,7 @@ public final class CacheBenchmark {
             String pq = "/obj/" + id + "?cc=" + URLEncoder.encode("max-age=" + ttl, StandardCharsets.UTF_8)
                     + "&etag=v" + id + "&delay=" + delayMs + "&size=" + bodyBytes;
             String line = direct
-                    ? "GET " + pq + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    ? "GET " + pq + " HTTP/1.1\r\nHost: localhost\r\n\r\n"
                     : "GET http://localhost:" + originPort + pq
                             + " HTTP/1.1\r\nHost: localhost\r\n\r\n"; // keep-alive: the connection is reused
             req[id] = line.getBytes(StandardCharsets.ISO_8859_1);
@@ -213,12 +214,14 @@ public final class CacheBenchmark {
 
         phase(targetPort, req, seq, 0, warmup, null, null, think);                 // warm the cache (not measured)
         int originBefore = origin.requestCount();
+        int connectionsBefore = origin.connectionCount();
         long[] lat = new long[requests];
         byte[] cls = new byte[requests];
         long t0 = System.nanoTime();
         phase(targetPort, req, seq, warmup, warmup + requests, lat, cls, think);
         double seconds = (System.nanoTime() - t0) / 1e9;
         int originRequests = origin.requestCount() - originBefore;
+        int originConnections = origin.connectionCount() - connectionsBefore;
 
         if (proxySocket != null) {
             proxySocket.close();
@@ -232,6 +235,7 @@ public final class CacheBenchmark {
         r.ttl = ttl;
         r.measured = requests;
         r.originRequests = originRequests;
+        r.originConnections = originConnections;
         r.reqPerSec = requests / seconds;
         r.idealHitPct = direct ? 0 : 100.0 * zipf.topMass(capacity);
 
@@ -440,17 +444,17 @@ public final class CacheBenchmark {
     // ---- output ----
 
     private void printHeader() {
-        System.out.println(String.format("%-9s %-6s %-6s %7s %7s %7s %8s %8s %8s %8s %9s %8s",
+        System.out.println(String.format("%-9s %-6s %-6s %7s %7s %7s %8s %8s %8s %8s %9s %9s %8s",
                 "capacity", "zipf_s", "ttl_s", "hit%", "reval%", "miss%", "mean_ms", "p50_ms", "p95_ms", "p99_ms",
-                "origin_req", "saving%"));
+                "origin_req", "origin_tcp", "saving%"));
     }
 
     private void printRow(Result r) {
         System.out.println(String.format(Locale.ROOT,
-                "%-9s %-6.1f %-6d %7.1f %7.1f %7.1f %8.2f %8.2f %8.2f %8.2f %9d %8.1f%s",
+                "%-9s %-6.1f %-6d %7.1f %7.1f %7.1f %8.2f %8.2f %8.2f %8.2f %9d %9d %8.1f%s",
                 r.capacity == 0 ? "none" : String.valueOf(r.capacity), r.zipfS, r.ttl,
                 100.0 * r.hit / r.measured, 100.0 * r.revalidated / r.measured, 100.0 * r.miss / r.measured,
-                r.meanMs, r.p50, r.p95, r.p99, r.originRequests, r.savingPct,
+                r.meanMs, r.p50, r.p95, r.p99, r.originRequests, r.originConnections, r.savingPct,
                 r.errors > 0 ? "   (" + r.errors + " errors!)" : ""));
         if (!r.errorSummary.isEmpty()) {
             System.out.println("          error reasons: " + r.errorSummary);
@@ -459,11 +463,11 @@ public final class CacheBenchmark {
 
     private void write(PrintWriter w, Result r) {
         w.println(String.format(Locale.ROOT,
-                "%s,%d,%.1f,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%d,%.1f,%.1f,%d",
+                "%s,%d,%.1f,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%d,%d,%.1f,%.1f,%d",
                 r.sweep, r.capacity, r.zipfS, objects, r.ttl, concurrency, delayMs, r.measured,
                 100.0 * r.hit / r.measured, 100.0 * r.revalidated / r.measured, 100.0 * r.miss / r.measured,
                 r.meanMs, r.p50, r.p95, r.p99, r.hitP50, r.missP50, r.reqPerSec, r.originRequests,
-                r.idealHitPct, r.savingPct, r.errors));
+                r.originConnections, r.idealHitPct, r.savingPct, r.errors));
         w.flush();
     }
 }

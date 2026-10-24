@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   lm=3600                Last-Modified = server start minus N seconds
  *   vary=Accept-Encoding   Vary header                    cookie=a%3D1  Set-Cookie header
  *   delay=200              wait N ms before replying      size=5000  pad the body to N bytes
+ *   close=1                answer "Connection: close" and hang up (no connection reuse)
+ *   drop=1                 announce keep-alive but hang up anyway (a stale connection for the proxy to cope with)
  *
  * It also answers conditional requests: If-None-Match matching etag, or If-Modified-Since
  * not older than lm, gives "304 Not Modified" (used from Step 4 on).
@@ -38,6 +40,7 @@ public final class TestOrigin {
     private final ServerSocket serverSocket;
     private final long startMs = (System.currentTimeMillis() / 1000) * 1000;
     private final AtomicInteger totalRequests = new AtomicInteger();
+    private final AtomicInteger connections = new AtomicInteger();
     private final AtomicInteger conditionalRequests = new AtomicInteger();
     private final AtomicInteger notModifiedReplies = new AtomicInteger();
     private final Map<String, AtomicInteger> perUrl = new ConcurrentHashMap<>();
@@ -60,6 +63,11 @@ public final class TestOrigin {
         return totalRequests.get();
     }
 
+    /** TCP connections accepted so far (shows whether the proxy reuses its connections). */
+    public int connectionCount() {
+        return connections.get();
+    }
+
     /** Requests that carried If-None-Match or If-Modified-Since. */
     public int conditionalCount() {
         return conditionalRequests.get();
@@ -74,6 +82,7 @@ public final class TestOrigin {
         try {
             while (true) {
                 Socket s = serverSocket.accept();
+                connections.incrementAndGet();
                 Thread t = new Thread(() -> handle(s));
                 t.setDaemon(true);
                 t.start();
@@ -83,26 +92,37 @@ public final class TestOrigin {
         }
     }
 
+    /** Serves requests on one connection until the client closes it, asks for close, or goes idle. */
     private void handle(Socket s) {
         try (s) {
             s.setSoTimeout(5000);
-            InputStream in = s.getInputStream();
-            ByteArrayOutputStream acc = new ByteArrayOutputStream();
-            byte[] buf = new byte[2048];
-            String text;
-            do {
-                int n = in.read(buf);
-                if (n == -1) {
+            s.setTcpNoDelay(true);
+            RequestReader reader = new RequestReader(s.getInputStream());
+            OutputStream out = s.getOutputStream();
+            while (true) {
+                String block = reader.readHeaderBlock();
+                if (block == null) {
+                    return; // client closed the connection
+                }
+                if (!serveOne(block, out)) {
                     return;
                 }
-                acc.write(buf, 0, n);
-                text = acc.toString(StandardCharsets.ISO_8859_1);
-            } while (!text.contains("\r\n\r\n"));
+            }
+        } catch (java.net.SocketTimeoutException e) {
+            // idle connection: close it quietly
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            // test helper: ignore broken connections and malformed test URLs
+        }
+    }
 
+    /** Answers one request; returns true if the connection stays open for another one. */
+    private boolean serveOne(String text, OutputStream out) throws IOException, InterruptedException {
+        {
             String[] lines = text.split("\r\n");
             String[] requestLine = lines[0].split(" ");
             String method = requestLine[0];
             String target = requestLine[1];
+            String version = requestLine.length > 2 ? requestLine[2] : "HTTP/1.0";
             Map<String, String> reqHeaders = new HashMap<>();
             for (int i = 1; i < lines.length && !lines[i].isEmpty(); i++) {
                 int c = lines[i].indexOf(':');
@@ -215,7 +235,13 @@ public final class TestOrigin {
                 h.append("Content-Type: text/plain\r\n");
                 h.append("Content-Length: ").append(body.length).append("\r\n");
             }
-            h.append("Connection: close\r\n\r\n");
+            // Keep the connection open unless the client or the "close" / "drop" switches say otherwise.
+            String connHeader = reqHeaders.getOrDefault("connection", "").toLowerCase(Locale.ROOT);
+            boolean clientKeepAlive = version.equals("HTTP/1.1") ? !connHeader.contains("close")
+                    : connHeader.contains("keep-alive");
+            boolean announceKeepAlive = clientKeepAlive && !p.containsKey("close");
+            boolean reallyKeep = announceKeepAlive && !p.containsKey("drop"); // "drop" = lie: announce, then hang up
+            h.append(announceKeepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n");
 
             if (!quiet) {
                 System.out.println("[origin] #" + n + " " + method + " " + target + " -> " + status
@@ -223,14 +249,18 @@ public final class TestOrigin {
                         + (cc != null && !cc.isEmpty() ? " cc=" + cc : ""));
             }
 
-            OutputStream out = s.getOutputStream();
-            out.write(h.toString().getBytes(StandardCharsets.ISO_8859_1));
-            if (!method.equals("HEAD")) {
-                out.write(body);
+            // One write for headers and body: two small writes on a kept-open connection can stall
+            // for ~40 ms (Nagle's algorithm waiting for a delayed ACK).
+            byte[] headBytes = h.toString().getBytes(StandardCharsets.ISO_8859_1);
+            byte[] whole = headBytes;
+            if (!method.equals("HEAD") && body.length > 0) {
+                whole = new byte[headBytes.length + body.length];
+                System.arraycopy(headBytes, 0, whole, 0, headBytes.length);
+                System.arraycopy(body, 0, whole, headBytes.length, body.length);
             }
+            out.write(whole);
             out.flush();
-        } catch (IOException | InterruptedException | RuntimeException e) {
-            // test helper: ignore broken connections and malformed test URLs
+            return reallyKeep;
         }
     }
 

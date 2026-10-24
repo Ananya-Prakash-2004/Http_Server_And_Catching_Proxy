@@ -141,6 +141,64 @@ public class ProxyCacheTest {
         return s;
     }
 
+    static void originConnectionTests() throws Exception {
+        // 20 sequential cache misses: the proxy should keep using one connection to the origin
+        int c0 = origin.connectionCount();
+        int r0 = origin.requestCount();
+        boolean allOk = true;
+        for (int i = 0; i < 20; i++) {
+            Resp r = get(url("pool" + i, "cc", "no-store"));
+            allOk &= r.status == 200 && "MISS".equals(r.xcache());
+        }
+        check("20 sequential misses all succeed and reach the origin 20 times",
+                allOk && origin.requestCount() - r0 == 20);
+        check("...over a reused connection (origin accepted at most 3 connections, not 20)",
+                origin.connectionCount() - c0 <= 3);
+
+        // origin that answers "Connection: close": its connection must not be pooled
+        c0 = origin.connectionCount();
+        allOk = true;
+        for (int i = 0; i < 3; i++) {
+            Resp r = get(url("closing" + i, "cc", "no-store", "close", "1"));
+            allOk &= r.status == 200 && !r.body.isEmpty();
+        }
+        check("origin saying Connection: close is respected (a new connection for each of the next requests)",
+                allOk && origin.connectionCount() - c0 >= 2);
+
+        // origin that announces keep-alive but hangs up: the stale pooled connection must be retried invisibly
+        allOk = true;
+        for (int i = 0; i < 4; i++) {
+            Resp r = get(url("dropping" + i, "cc", "no-store", "drop", "1"));
+            allOk &= r.status == 200 && !r.body.isEmpty();
+        }
+        check("a pooled connection the origin has silently closed is retried on a fresh one (no 502 for the client)", allOk);
+
+        // origin speaking HTTP/1.0 with no length: the body ends when the origin closes
+        ServerSocket old = new ServerSocket(0);
+        int oldPort = old.getLocalPort();
+        Thread ot = new Thread(() -> {
+            try {
+                while (true) {
+                    Socket c = old.accept();
+                    c.getInputStream().read(new byte[2048]);
+                    c.getOutputStream().write("HTTP/1.0 200 OK\r\nCache-Control: no-store\r\n\r\nhello-eof"
+                            .getBytes(StandardCharsets.ISO_8859_1));
+                    c.close();
+                }
+            } catch (IOException e) {
+                // closed
+            }
+        });
+        ot.setDaemon(true);
+        ot.start();
+        Resp e1 = get("http://localhost:" + oldPort + "/a");
+        Resp e2 = get("http://localhost:" + oldPort + "/b");
+        check("an HTTP/1.0 origin whose body ends at connection close works, twice in a row",
+                e1.status == 200 && "hello-eof".equals(e1.body) && "9".equals(e1.headers.get("content-length"))
+                        && e2.status == 200 && "hello-eof".equals(e2.body));
+        old.close();
+    }
+
     static void keepAliveTests() throws Exception {
         System.out.println("Persistent connections (keep-alive)");
         {
@@ -502,6 +560,9 @@ public class ProxyCacheTest {
 
 
         keepAliveTests();
+
+        System.out.println("Connections from the proxy to the origin");
+        originConnectionTests();
 
         System.out.println("LRU eviction through the proxy (capacity 2)");
         ServerSocket smallSocket = new ServerSocket(0);

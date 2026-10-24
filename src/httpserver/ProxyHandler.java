@@ -48,6 +48,9 @@ public class ProxyHandler implements Runnable {
     /** Per-request log lines on the console. The benchmark switches this off. */
     public static volatile boolean verbose = true;
 
+    /** Idle keep-alive connections to origins, shared by all client connections. */
+    private static final OriginPool ORIGIN_POOL = new OriginPool();
+
     private final Socket clientSocket;
     private final LruCache<String, CacheEntry> cache;
 
@@ -69,6 +72,7 @@ public class ProxyHandler implements Runnable {
              OutputStream out = client.getOutputStream()) {
 
             client.setSoTimeout(IDLE_TIMEOUT_MS);
+            client.setTcpNoDelay(true); // send responses immediately (no Nagle delay on kept-open connections)
 
             // One RequestReader per connection: it buffers bytes until the blank line that ends the
             // headers and keeps any extra bytes for the next request on the same connection.
@@ -291,8 +295,8 @@ public class ProxyHandler implements Runnable {
     }
 
     /**
-     * Connects to the origin, sends the request and reads the complete response.
-     * On failure sends 502 / 504 to the client itself and returns null.
+     * Sends the request to the origin (on a pooled connection if one is idle) and reads the
+     * complete response. On failure sends 502 / 504 to the client itself and returns null.
      *
      * @param validators {etag, lastModified} of our cached copy (either may be null) to make the
      *                   request conditional, or null to forward the client's own headers untouched
@@ -300,33 +304,57 @@ public class ProxyHandler implements Runnable {
     private ProxyResponse fetchFromOrigin(OutputStream clientOut, HttpRequest request, String method,
                                           String host, int port, String originPath,
                                           String[] validators) throws IOException {
-        try (Socket origin = new Socket()) {
-            try {
-                origin.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
-            } catch (SocketTimeoutException e) {
-                sendError(clientOut, 504, "Gateway Timeout");
-                return null;
-            } catch (IOException e) { // UnknownHostException, ConnectException, ...
-                sendError(clientOut, 502, "Bad Gateway");
-                return null;
+        byte[] requestBytes = buildOriginRequest(request, method, host, port, originPath, validators)
+                .getBytes(StandardCharsets.ISO_8859_1);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            // Attempt 0 may use an idle pooled connection; attempt 1 always uses a fresh one.
+            Socket origin = attempt == 0 ? ORIGIN_POOL.borrow(host, port) : null;
+            boolean reused = origin != null;
+            if (!reused) {
+                origin = new Socket();
+                try {
+                    origin.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+                } catch (SocketTimeoutException e) {
+                    OriginPool.closeQuietly(origin);
+                    sendError(clientOut, 504, "Gateway Timeout");
+                    return null;
+                } catch (IOException e) { // UnknownHostException, ConnectException, ...
+                    OriginPool.closeQuietly(origin);
+                    sendError(clientOut, 502, "Bad Gateway");
+                    return null;
+                }
             }
-            origin.setSoTimeout(ORIGIN_READ_TIMEOUT_MS);
 
             try {
+                origin.setSoTimeout(ORIGIN_READ_TIMEOUT_MS);
+                origin.setTcpNoDelay(true);
                 OutputStream originOut = origin.getOutputStream();
-                originOut.write(buildOriginRequest(request, method, host, port, originPath, validators)
-                        .getBytes(StandardCharsets.ISO_8859_1));
+                originOut.write(requestBytes);
                 originOut.flush();
-                return ResponseReader.read(origin.getInputStream(), method.equals("HEAD"));
+                ProxyResponse response = ResponseReader.read(origin.getInputStream(), method.equals("HEAD"));
+                if (response.isOriginConnectionReusable()) {
+                    ORIGIN_POOL.release(host, port, origin);
+                } else {
+                    OriginPool.closeQuietly(origin);
+                }
+                return response;
             } catch (SocketTimeoutException e) {
+                OriginPool.closeQuietly(origin);
                 sendError(clientOut, 504, "Gateway Timeout");
                 return null;
             } catch (IOException e) {
+                OriginPool.closeQuietly(origin);
+                if (reused) {
+                    continue; // the origin had already closed this idle connection: GET/HEAD are safe to retry
+                }
                 System.err.println("Bad response from origin " + host + ":" + port + " - " + e.getMessage());
                 sendError(clientOut, 502, "Bad Gateway");
                 return null;
             }
         }
+        sendError(clientOut, 502, "Bad Gateway"); // not reached: attempt 1 always returns
+        return null;
     }
 
     private String buildOriginRequest(HttpRequest request, String method, String host, int port,
@@ -353,7 +381,7 @@ public class ProxyHandler implements Runnable {
                 sb.append("If-Modified-Since: ").append(validators[1]).append("\r\n");
             }
         }
-        sb.append("Connection: close\r\n\r\n");
+        sb.append("\r\n"); // HTTP/1.1: the connection to the origin stays open for reuse
         return sb.toString();
     }
 

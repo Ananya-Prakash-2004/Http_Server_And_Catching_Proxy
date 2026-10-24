@@ -21,9 +21,16 @@ public final class ProxyResponse {
     private final List<String[]> headers; // {name, value} pairs, original case/order, duplicates kept
     private final byte[] body;
     private final long declaredLength;    // Content-Length to emit, or -1 for none
+    private final boolean originConnectionReusable; // origin kept the connection open after this response
 
     public ProxyResponse(int statusCode, String reason, List<String[]> headers,
                          byte[] body, long declaredLength) {
+        this(statusCode, reason, headers, body, declaredLength, false);
+    }
+
+    public ProxyResponse(int statusCode, String reason, List<String[]> headers,
+                         byte[] body, long declaredLength, boolean originConnectionReusable) {
+        this.originConnectionReusable = originConnectionReusable;
         this.statusCode = statusCode;
         this.reason = reason;
         this.headers = List.copyOf(headers);
@@ -66,6 +73,11 @@ public final class ProxyResponse {
             }
         }
         return new ProxyResponse(304, "Not Modified", kept, new byte[0], -1);
+    }
+
+    /** True if the origin connection this response arrived on may carry another request. */
+    public boolean isOriginConnectionReusable() {
+        return originConnectionReusable;
     }
 
     public int getStatusCode() {
