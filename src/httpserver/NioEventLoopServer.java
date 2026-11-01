@@ -185,9 +185,8 @@ public final class NioEventLoopServer {
 
             HttpRequest request;
             try {
-                // The team's current parser method is parser(...), per HttpRequestParser.java.
-                // Interface.md currently documents parse(...); coordinate a rename with the team.
-                request = HttpRequestParser.parser(rawHeaders);
+                // Use the latest HTTP request parser interface from the main branch.
+                request = HttpRequestParser.parse(rawHeaders);
             } catch (IllegalArgumentException e) {
                 queueError(key, state, "400 Bad Request", false, true, null);
                 return;
