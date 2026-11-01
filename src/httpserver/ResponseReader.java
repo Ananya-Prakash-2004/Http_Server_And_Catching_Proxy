@@ -11,22 +11,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-/**
- * Reads one HTTP/1.1 response from an origin socket and turns it into a
- * ProxyResponse. Handles the three ways a body can be framed:
- *   1. Transfer-Encoding: chunked   (decoded here)
- *   2. Content-Length: N            (read exactly N bytes)
- *   3. neither                      (body runs until the origin closes the socket)
- * Responses to HEAD, and 1xx / 204 / 304 responses, never have a body.
- */
+
 public final class ResponseReader {
 
     private static final int MAX_LINE_BYTES = 16 * 1024;
     private static final int MAX_HEAD_BYTES = 64 * 1024;
     private static final int MAX_BODY_BYTES = 16 * 1024 * 1024;
 
-    // Removed while parsing: hop-by-hop headers (RFC 7230 6.1) plus the origin's framing,
-    // which ProxyResponse.toBytes() regenerates.
+    
     private static final Set<String> STRIPPED = Set.of(
             "connection", "proxy-connection", "keep-alive", "te", "trailer",
             "transfer-encoding", "upgrade", "proxy-authenticate", "proxy-authorization",
@@ -43,7 +35,7 @@ public final class ResponseReader {
         String httpVersion;
         List<String[]> allHeaders;
 
-        // Skip interim 1xx responses (e.g. 100 Continue); a real response follows them.
+        
         while (true) {
             int[] budget = {MAX_HEAD_BYTES};
             String statusLine = readLine(in, budget);
@@ -98,8 +90,7 @@ public final class ResponseReader {
                 }
             }
         }
-        // HTTP/1.1 connections stay open unless the origin says "close"; HTTP/1.0 ones close unless
-        // the origin says "keep-alive".
+        
         boolean reusable = !closeToken && status != 101
                 && (httpVersion.equals("HTTP/1.1") || keepAliveToken);
         List<String[]> kept = new ArrayList<>();

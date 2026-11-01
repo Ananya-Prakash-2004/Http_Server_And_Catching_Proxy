@@ -14,7 +14,7 @@ import java.util.Map;
 
 public class HttpResponse {
 
-    /** Produces a body piece by piece when the total size isn't known up front. Returns null when done. */
+    
     public interface ChunkSource {
         byte[] next() throws IOException;
     }

@@ -2,7 +2,7 @@ package httpserver;
 
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Server-side counters of how each proxied request was answered. Errors (502/504) are not counted. */
+
 public final class ProxyStats {
     public static final AtomicLong HITS = new AtomicLong();          // fresh copy served, origin not contacted
     public static final AtomicLong REVALIDATED = new AtomicLong();   // stale copy checked with the origin (304), body reused

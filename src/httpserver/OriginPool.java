@@ -7,18 +7,9 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Idle keep-alive connections from the proxy to origin servers, so that a cache miss does not
- * have to open (and later close) a new TCP connection each time. Without this, a busy proxy
- * burns through the operating system's temporary ports: every closed connection keeps its
- * port reserved for a minute or two, and Windows allows only about 16,000 of them.
- *
- * A connection is borrowed for exactly one request/response and handed back only if the origin
- * said it stays open. An idle connection may still have been closed by the origin in the
- * meantime; the caller copes with that by retrying once on a fresh connection.
- */
+
 final class OriginPool {
-    /** Origins close idle connections (the team's server after 5 s), so do not trust older ones. */
+  
     private static final long MAX_IDLE_MS = 4_000;
     private static final int MAX_IDLE_PER_ORIGIN = 64;
 
@@ -34,7 +25,7 @@ final class OriginPool {
 
     private final Map<String, Deque<Idle>> idle = new HashMap<>();
 
-    /** A reusable idle connection to host:port, or null if there is none. */
+    
     synchronized Socket borrow(String host, int port) {
         Deque<Idle> d = idle.get(key(host, port));
         long now = System.currentTimeMillis();
@@ -48,7 +39,7 @@ final class OriginPool {
         return null;
     }
 
-    /** Hands a connection back after a complete response that allows reuse. */
+    
     synchronized void release(String host, int port, Socket socket) {
         long now = System.currentTimeMillis();
         Deque<Idle> d = idle.computeIfAbsent(key(host, port), k -> new ArrayDeque<>());

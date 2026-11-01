@@ -10,11 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * End-to-end test: starts TestOrigin and the proxy inside this JVM and checks, request by
- * request, whether the proxy answered from its cache (X-Cache: HIT) or went to the origin.
- * Run: java -cp out httpserver.ProxyCacheTest
- */
+
 public class ProxyCacheTest {
     static int passed = 0;
     static int failed = 0;
@@ -42,7 +38,7 @@ public class ProxyCacheTest {
         }
     }
 
-    /** URL of the test origin; kv = alternating parameter names and values. */
+    
     static String url(String path, String... kv) throws IOException {
         StringBuilder sb = new StringBuilder("http://localhost:" + originPort + "/" + path);
         for (int i = 0; i < kv.length; i += 2) {
@@ -92,7 +88,7 @@ public class ProxyCacheTest {
     }
 
 
-    /** Reads exactly one response from a persistent connection (framed by Content-Length). Null at EOF. */
+    
     static Resp readOne(InputStream in, boolean headRequest) throws IOException {
         ByteArrayOutputStream head = new ByteArrayOutputStream();
         int[] pattern = {'\r', '\n', '\r', '\n'};

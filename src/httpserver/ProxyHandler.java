@@ -12,43 +12,29 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Forward proxy handler (Step 4: ETag validation and conditional GET).
- *
- * For each request there are three possible paths:
- *   HIT          a fresh copy is in the cache: answer without contacting the origin.
- *   REVALIDATED  the copy is stale (or the client asked for a fresh one) but has an
- *                ETag / Last-Modified: ask the origin with If-None-Match /
- *                If-Modified-Since. A 304 means "your copy is still good": the stored
- *                body is reused and its freshness restarts.
- *   MISS         nothing usable cached (or the resource changed): full response from
- *                the origin, stored if CachePolicy allows.
- *
- * Independently of that, if the CLIENT sent its own If-None-Match / If-Modified-Since
- * and the response we are about to send matches, we send a bodyless 304 instead of the 200.
- * Every response carries an X-Cache header; cached ones also carry an Age header.
- */
+
+ 
 public class ProxyHandler implements Runnable {
 
-    private static final int IDLE_TIMEOUT_MS = 5_000;            // how long an idle client connection is kept open
-    private static final int MAX_REQUESTS_PER_CONNECTION = 100;  // same limits as the team's ConnectionHandler
+    private static final int IDLE_TIMEOUT_MS = 5_000;            
+    private static final int MAX_REQUESTS_PER_CONNECTION = 100;  
     private static final int CONNECT_TIMEOUT_MS = 5_000;
     private static final int ORIGIN_READ_TIMEOUT_MS = 10_000;
-    private static final int MAX_CACHEABLE_BYTES = 1024 * 1024; // don't cache bodies over 1 MB
+    private static final int MAX_CACHEABLE_BYTES = 1024 * 1024; 
 
-    // Request headers that must not be forwarded (hop-by-hop, RFC 7230 section 6.1).
+    
     private static final Set<String> HOP_BY_HOP = Set.of(
             "connection", "proxy-connection", "keep-alive", "te", "trailer",
             "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate");
 
-    // When the proxy revalidates, it replaces the client's own conditional headers with its own.
+    
     private static final Set<String> CLIENT_CONDITIONALS = Set.of(
             "if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range");
 
-    /** Per-request log lines on the console. The benchmark switches this off. */
+    
     public static volatile boolean verbose = true;
 
-    /** Idle keep-alive connections to origins, shared by all client connections. */
+    
     private static final OriginPool ORIGIN_POOL = new OriginPool();
 
     private final Socket clientSocket;
@@ -72,10 +58,8 @@ public class ProxyHandler implements Runnable {
              OutputStream out = client.getOutputStream()) {
 
             client.setSoTimeout(IDLE_TIMEOUT_MS);
-            client.setTcpNoDelay(true); // send responses immediately (no Nagle delay on kept-open connections)
+            client.setTcpNoDelay(true); 
 
-            // One RequestReader per connection: it buffers bytes until the blank line that ends the
-            // headers and keeps any extra bytes for the next request on the same connection.
             RequestReader reader = new RequestReader(in);
             int served = 0;
 
@@ -110,12 +94,7 @@ public class ProxyHandler implements Runnable {
         }
     }
 
-    /**
-     * Answers one parsed request.
-     *
-     * @return true if a normal response was sent (the connection may be reused), false if an
-     *         error response was sent (the connection is closed)
-     */
+    
     private boolean serve(OutputStream out, HttpRequest request, boolean keepAlive) throws IOException {
         String method = request.getMethod();
         if (!method.equals("GET") && !method.equals("HEAD")) {

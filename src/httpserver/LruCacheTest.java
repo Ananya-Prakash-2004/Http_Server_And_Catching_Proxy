@@ -3,7 +3,7 @@ package httpserver;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Plain-Java tests for LruCache (no JUnit needed). Run: java -cp out httpserver.LruCacheTest */
+
 public class LruCacheTest {
 
     static void check(boolean condition, String message) {

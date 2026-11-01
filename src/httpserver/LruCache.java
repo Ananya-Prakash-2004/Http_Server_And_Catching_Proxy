@@ -3,14 +3,7 @@ package httpserver;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * Thread-safe LRU cache with O(1) get / put / remove.
- *
- * Design: a HashMap gives O(1) key -> node lookup, and a doubly-linked list keeps
- * the entries ordered by recency. The head side is the most recently used entry,
- * the tail side is the least recently used (the next eviction victim). Sentinel
- * head/tail nodes mean we never special-case "empty list" or "first/last node".
- */
+
 public class LruCache<K, V> {
 
     private static class Node<K, V> {
@@ -44,7 +37,7 @@ public class LruCache<K, V> {
         tail.prev = head;
     }
 
-    /** Returns the value and marks it most recently used, or null if absent. */
+    
     public synchronized V get(K key) {
         Node<K, V> node = map.get(key);
         if (node == null) {
@@ -57,7 +50,7 @@ public class LruCache<K, V> {
         return node.value;
     }
 
-    /** Inserts or replaces; evicts the least recently used entry if over capacity. */
+    
     public synchronized void put(K key, V value) {
         Node<K, V> existing = map.get(key);
         if (existing != null) {
@@ -107,7 +100,7 @@ public class LruCache<K, V> {
                 map.size(), capacity, hits, misses, evictions, ratio);
     }
 
-    // --- linked-list helpers (callers hold the lock) ---
+    
 
     private void unlink(Node<K, V> node) {
         node.prev.next = node.next;

@@ -28,7 +28,7 @@ public class HttpRequest {
     }
 
     public void addHeader(String name, String value) {
-        // Header names are case-insensitive per HTTP spec — normalize to lowercase as the key
+        
         headers.put(name.toLowerCase(), value);
     }
 
