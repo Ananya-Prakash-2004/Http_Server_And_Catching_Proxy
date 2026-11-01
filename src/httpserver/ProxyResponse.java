@@ -13,7 +13,7 @@ public final class ProxyResponse {
     private final String reason;
     private final List<String[]> headers; 
     private final byte[] body;
-    private final long declaredLength; 
+    private final long declaredLength;    
     private final boolean originConnectionReusable; 
 
     public ProxyResponse(int statusCode, String reason, List<String[]> headers,
@@ -52,6 +52,7 @@ public final class ProxyResponse {
         return new ProxyResponse(statusCode, reason, merged, body, declaredLength);
     }
 
+    
     public static ProxyResponse notModifiedFrom(ProxyResponse full) {
         List<String[]> kept = new ArrayList<>();
         for (String[] h : full.headers) {
@@ -62,6 +63,7 @@ public final class ProxyResponse {
         return new ProxyResponse(304, "Not Modified", kept, new byte[0], -1);
     }
 
+    
     public boolean isOriginConnectionReusable() {
         return originConnectionReusable;
     }
@@ -78,6 +80,7 @@ public final class ProxyResponse {
         return headers;
     }
 
+    
     public String getHeaderJoined(String name) {
         StringBuilder sb = null;
         for (String[] h : headers) {
@@ -115,6 +118,7 @@ public final class ProxyResponse {
         return toBytes(headOnly, xCache, ageSeconds, false);
     }
 
+    
     public byte[] toBytes(boolean headOnly, String xCache, long ageSeconds, boolean keepAlive) {
         StringBuilder sb = new StringBuilder();
         sb.append("HTTP/1.1 ").append(statusCode).append(' ').append(reason).append("\r\n");

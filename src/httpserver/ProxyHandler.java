@@ -12,6 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
 
+
+ 
 public class ProxyHandler implements Runnable {
 
     private static final int IDLE_TIMEOUT_MS = 5_000;            
@@ -20,7 +22,7 @@ public class ProxyHandler implements Runnable {
     private static final int ORIGIN_READ_TIMEOUT_MS = 10_000;
     private static final int MAX_CACHEABLE_BYTES = 1024 * 1024; 
 
-    // Request headers that must not be forwarded (hop-by-hop, RFC 7230 section 6.1).
+    
     private static final Set<String> HOP_BY_HOP = Set.of(
             "connection", "proxy-connection", "keep-alive", "te", "trailer",
             "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate");
@@ -58,7 +60,6 @@ public class ProxyHandler implements Runnable {
             client.setSoTimeout(IDLE_TIMEOUT_MS);
             client.setTcpNoDelay(true); 
 
-        
             RequestReader reader = new RequestReader(in);
             int served = 0;
 

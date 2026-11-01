@@ -18,7 +18,7 @@ public final class ResponseReader {
     private static final int MAX_HEAD_BYTES = 64 * 1024;
     private static final int MAX_BODY_BYTES = 16 * 1024 * 1024;
 
-   
+    
     private static final Set<String> STRIPPED = Set.of(
             "connection", "proxy-connection", "keep-alive", "te", "trailer",
             "transfer-encoding", "upgrade", "proxy-authenticate", "proxy-authorization",
@@ -35,7 +35,7 @@ public final class ResponseReader {
         String httpVersion;
         List<String[]> allHeaders;
 
-       
+        
         while (true) {
             int[] budget = {MAX_HEAD_BYTES};
             String statusLine = readLine(in, budget);

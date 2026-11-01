@@ -14,7 +14,7 @@ import java.util.Map;
 
 public class HttpResponse {
 
-   
+    
     public interface ChunkSource {
         byte[] next() throws IOException;
     }

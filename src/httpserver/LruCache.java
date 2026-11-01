@@ -3,6 +3,7 @@ package httpserver;
 import java.util.HashMap;
 import java.util.Map;
 
+
 public class LruCache<K, V> {
 
     private static class Node<K, V> {
@@ -36,6 +37,7 @@ public class LruCache<K, V> {
         tail.prev = head;
     }
 
+    
     public synchronized V get(K key) {
         Node<K, V> node = map.get(key);
         if (node == null) {
@@ -98,6 +100,7 @@ public class LruCache<K, V> {
                 map.size(), capacity, hits, misses, evictions, ratio);
     }
 
+    
 
     private void unlink(Node<K, V> node) {
         node.prev.next = node.next;

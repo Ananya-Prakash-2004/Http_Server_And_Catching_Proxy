@@ -15,7 +15,7 @@ public final class CacheControl {
         this.directives = directives;
     }
 
-   
+    
     public static CacheControl parse(String headerValue) {
         Map<String, String> map = new HashMap<>();
         if (headerValue != null) {
@@ -55,6 +55,7 @@ public final class CacheControl {
         return directives.containsKey(name);
     }
 
+    
     public long seconds(String name) {
         String v = directives.get(name);
         if (v == null) {

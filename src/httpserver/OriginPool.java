@@ -7,8 +7,9 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Map;
 
+
 final class OriginPool {
-    /** Origins close idle connections (the team's server after 5 s), so do not trust older ones. */
+  
     private static final long MAX_IDLE_MS = 4_000;
     private static final int MAX_IDLE_PER_ORIGIN = 64;
 
@@ -38,7 +39,7 @@ final class OriginPool {
         return null;
     }
 
-   
+    
     synchronized void release(String host, int port, Socket socket) {
         long now = System.currentTimeMillis();
         Deque<Idle> d = idle.computeIfAbsent(key(host, port), k -> new ArrayDeque<>());

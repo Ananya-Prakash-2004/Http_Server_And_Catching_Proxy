@@ -7,7 +7,7 @@ import java.util.Set;
 
 public final class CachePolicy {
 
-    /** Statuses a cache may store by default (RFC 7231 section 6.1). */
+   
     private static final Set<Integer> CACHEABLE_STATUS = Set.of(200, 203, 204, 300, 301, 404, 405, 410, 414, 501);
 
     private static final long HEURISTIC_CAP_MS = 24L * 60 * 60 * 1000;
@@ -15,7 +15,7 @@ public final class CachePolicy {
     private CachePolicy() {
     }
 
-   
+    
     public static CacheEntry evaluate(ProxyResponse resp, boolean requestHadAuthorization, long nowMs) {
         CacheControl cc = CacheControl.parse(resp.getHeaderJoined("cache-control"));
 
@@ -23,14 +23,14 @@ public final class CachePolicy {
             return null;
         }
         if (cc.has("no-store") || cc.has("private")) {
-            return null; // private = for one user only; a shared proxy must not keep it
+            return null; 
         }
         if (resp.getHeader("vary") != null) {
-            return null; // we do not keep per-variant copies
+            return null; 
         }
         if (requestHadAuthorization
                 && !(cc.has("public") || cc.has("s-maxage") || cc.has("must-revalidate"))) {
-            return null; // RFC 7234 3.2: shared caches need explicit permission for these
+            return null; 
         }
 
         boolean noCache = cc.has("no-cache");
@@ -122,7 +122,7 @@ public final class CachePolicy {
         return t.startsWith("W/") ? t.substring(2) : t;
     }
 
-
+    
     static List<String> parseEtagList(String value) {
         List<String> tags = new ArrayList<>();
         int i = 0;
