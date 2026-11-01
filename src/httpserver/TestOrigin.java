@@ -1,8 +1,6 @@
 package httpserver;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -14,28 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * A tiny origin server for testing the proxy. It builds each response from
- * query-string parameters, so one URL decides exactly what headers come back.
- *
- *   status=404             status code (default 200); "200|500|200" = a different status per request
- *   cc=max-age%3D60        Cache-Control value. "a|b|c" = a on the 1st request for this
- *                          exact URL, b on the 2nd, c from the 3rd on ("" = no header)
- *   expires=60             Expires header, N seconds from now (negative = in the past)
- *   expiresraw=0           Expires header with this literal text
- *   etag=v1                ETag (quoted for you); "v1|v2" = v1 on the 1st request, v2 afterwards (a change)
- *   lm=3600                Last-Modified = server start minus N seconds
- *   vary=Accept-Encoding   Vary header                    cookie=a%3D1  Set-Cookie header
- *   delay=200              wait N ms before replying      size=5000  pad the body to N bytes
- *   close=1                answer "Connection: close" and hang up (no connection reuse)
- *   drop=1                 announce keep-alive but hang up anyway (a stale connection for the proxy to cope with)
- *
- * It also answers conditional requests: If-None-Match matching etag, or If-Modified-Since
- * not older than lm, gives "304 Not Modified" (used from Step 4 on).
- * Every request is logged, so you can see when the proxy really reached the origin.
- *
- * Usage: java httpserver.TestOrigin [port]     (default 9090)
- */
+
 public final class TestOrigin {
     private final ServerSocket serverSocket;
     private final long startMs = (System.currentTimeMillis() / 1000) * 1000;
@@ -58,22 +35,22 @@ public final class TestOrigin {
         new TestOrigin(ss, false).serve();
     }
 
-    /** Number of requests that actually reached this origin. */
+    
     public int requestCount() {
         return totalRequests.get();
     }
 
-    /** TCP connections accepted so far (shows whether the proxy reuses its connections). */
+    
     public int connectionCount() {
         return connections.get();
     }
 
-    /** Requests that carried If-None-Match or If-Modified-Since. */
+   
     public int conditionalCount() {
         return conditionalRequests.get();
     }
 
-    /** 304 replies this origin has sent. */
+   
     public int notModifiedCount() {
         return notModifiedReplies.get();
     }
@@ -92,7 +69,7 @@ public final class TestOrigin {
         }
     }
 
-    /** Serves requests on one connection until the client closes it, asks for close, or goes idle. */
+    
     private void handle(Socket s) {
         try (s) {
             s.setSoTimeout(5000);
@@ -102,20 +79,20 @@ public final class TestOrigin {
             while (true) {
                 String block = reader.readHeaderBlock();
                 if (block == null) {
-                    return; // client closed the connection
+                    return; 
                 }
                 if (!serveOne(block, out)) {
                     return;
                 }
             }
         } catch (java.net.SocketTimeoutException e) {
-            // idle connection: close it quietly
+            
         } catch (IOException | InterruptedException | RuntimeException e) {
-            // test helper: ignore broken connections and malformed test URLs
+            
         }
     }
 
-    /** Answers one request; returns true if the connection stays open for another one. */
+    
     private boolean serveOne(String text, OutputStream out) throws IOException, InterruptedException {
         {
             String[] lines = text.split("\r\n");
@@ -150,7 +127,7 @@ public final class TestOrigin {
             int status = Integer.parseInt(statusSeq[Math.min(k - 1, statusSeq.length - 1)]);
             long now = System.currentTimeMillis();
 
-            // Cache-Control, optionally a different value per successive request for this URL
+            
             String cc = null;
             if (p.containsKey("cc")) {
                 String[] seq = p.get("cc").split("\\|", -1);
@@ -167,7 +144,7 @@ public final class TestOrigin {
             }
             Long lmMs = p.containsKey("lm") ? startMs - Long.parseLong(p.get("lm")) * 1000 : null;
 
-            // Conditional request handling
+            
             boolean conditional = reqHeaders.containsKey("if-none-match") || reqHeaders.containsKey("if-modified-since");
             boolean notModified = false;
             if (status == 200) {
@@ -235,7 +212,7 @@ public final class TestOrigin {
                 h.append("Content-Type: text/plain\r\n");
                 h.append("Content-Length: ").append(body.length).append("\r\n");
             }
-            // Keep the connection open unless the client or the "close" / "drop" switches say otherwise.
+            
             String connHeader = reqHeaders.getOrDefault("connection", "").toLowerCase(Locale.ROOT);
             boolean clientKeepAlive = version.equals("HTTP/1.1") ? !connHeader.contains("close")
                     : connHeader.contains("keep-alive");
@@ -249,8 +226,7 @@ public final class TestOrigin {
                         + (cc != null && !cc.isEmpty() ? " cc=" + cc : ""));
             }
 
-            // One write for headers and body: two small writes on a kept-open connection can stall
-            // for ~40 ms (Nagle's algorithm waiting for a delayed ACK).
+           
             byte[] headBytes = h.toString().getBytes(StandardCharsets.ISO_8859_1);
             byte[] whole = headBytes;
             if (!method.equals("HEAD") && body.length > 0) {

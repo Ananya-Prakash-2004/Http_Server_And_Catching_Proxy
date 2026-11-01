@@ -29,11 +29,7 @@ public class StaticFileHandler {
         this.documentRoot = new File(documentRootPath).getCanonicalFile();
     }
 
-    /**
-     * Resolves a request path safely against the document root.
-     * Returns null if the path escapes the document root (traversal attempt)
-     * or if the resolved file does not exist.
-     */
+    
     public File resolveFile(String requestPath) {
         try {
             // Strip query string if present, and leading slash
@@ -44,7 +40,7 @@ public class StaticFileHandler {
 
             File candidate = new File(documentRoot, cleanPath).getCanonicalFile();
 
-            // Directory traversal check: candidate must live inside documentRoot
+            
             if (!candidate.getPath().startsWith(documentRoot.getPath())) {
                 System.out.println("Blocked directory traversal attempt: " + requestPath);
                 return null;
