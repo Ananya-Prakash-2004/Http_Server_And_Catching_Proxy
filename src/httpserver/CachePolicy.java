@@ -148,7 +148,7 @@ public final class CachePolicy {
                 if (comma < 0) {
                     break;
                 }
-                i = comma + 1; // skip an unparseable token
+                i = comma + 1; 
             }
         }
         return tags;

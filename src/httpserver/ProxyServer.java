@@ -17,7 +17,7 @@ public class ProxyServer {
 
         LruCache<String, CacheEntry> cache = new LruCache<>(capacity);
 
-        // Ctrl+C prints the cache statistics.
+        
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("Proxy stats: " + ProxyStats.summary());
             System.out.println("Cache stats: " + cache.stats());
@@ -39,7 +39,7 @@ public class ProxyServer {
                 pool.execute(new ProxyHandler(client, cache));
             }
         } catch (IOException e) {
-            // server socket closed: stop accepting
+            
         } finally {
             pool.shutdown();
         }

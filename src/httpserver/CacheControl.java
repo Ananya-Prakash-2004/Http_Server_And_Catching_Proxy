@@ -6,7 +6,7 @@ import java.util.Map;
 
 
 public final class CacheControl {
-    /** Upper bound for delta-seconds values (RFC 7234 section 1.2.1: 2^31). */
+    
     private static final long MAX_SECONDS = 2147483648L;
 
     private final Map<String, String> directives;

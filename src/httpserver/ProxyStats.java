@@ -4,10 +4,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 
 public final class ProxyStats {
-    public static final AtomicLong HITS = new AtomicLong();          // fresh copy served, origin not contacted
-    public static final AtomicLong REVALIDATED = new AtomicLong();   // stale copy checked with the origin (304), body reused
-    public static final AtomicLong MISSES = new AtomicLong();        // full response came from the origin
-    public static final AtomicLong NOT_MODIFIED_SENT = new AtomicLong(); // 304s the proxy sent to clients from its own knowledge
+    public static final AtomicLong HITS = new AtomicLong();          
+    public static final AtomicLong REVALIDATED = new AtomicLong();   
+    public static final AtomicLong MISSES = new AtomicLong();        
+    public static final AtomicLong NOT_MODIFIED_SENT = new AtomicLong(); 
 
     private ProxyStats() {
     }

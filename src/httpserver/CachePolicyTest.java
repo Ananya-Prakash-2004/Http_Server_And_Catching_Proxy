@@ -5,7 +5,7 @@ import java.util.List;
 
 
 public class CachePolicyTest {
-    static final long NOW = 1_800_000_000_000L; // fixed "current time" in ms
+    static final long NOW = 1_800_000_000_000L; 
 
     static void check(boolean condition, String message) {
         if (!condition) {

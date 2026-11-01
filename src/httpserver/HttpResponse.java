@@ -44,7 +44,7 @@ public class HttpResponse {
         return this;
     }
 
-    /** Send the body with Transfer-Encoding: chunked, pulling pieces from the source. */
+    
     public HttpResponse chunked(ChunkSource source) {
         this.chunkSource = source;
         return this;
@@ -96,7 +96,7 @@ public class HttpResponse {
 
         if (includeBody) {
             if (isChunked) {
-                out.flush(); // get the headers out before the first (possibly slow) chunk
+                out.flush(); 
                 writeChunks(out);
             } else if (bodyAllowed && body.length > 0) {
                 out.write(body);

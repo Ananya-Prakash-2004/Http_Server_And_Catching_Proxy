@@ -76,7 +76,7 @@ public final class ResponseReader {
             break;
         }
 
-        // Header names listed in "Connection: x, y" are hop-by-hop too.
+        
         Set<String> dropped = new HashSet<>(STRIPPED);
         boolean closeToken = false;
         boolean keepAliveToken = false;
@@ -142,7 +142,7 @@ public final class ResponseReader {
         } else {
             body = readUntilEof(in);
             declared = body.length;
-            reusable = false; // the end of the body was the origin closing the connection
+            reusable = false; 
         }
 
         return new ProxyResponse(status, reason, kept, body, declared, reusable);
@@ -155,7 +155,7 @@ public final class ResponseReader {
             if (sizeLine == null) {
                 throw new IOException("Origin closed the connection in the middle of a chunked body");
             }
-            int semi = sizeLine.indexOf(';'); // ignore chunk extensions
+            int semi = sizeLine.indexOf(';'); 
             String hex = (semi >= 0 ? sizeLine.substring(0, semi) : sizeLine).trim();
             long size;
             try {
@@ -182,7 +182,7 @@ public final class ResponseReader {
                 throw new IOException("Missing CRLF after chunk data");
             }
         }
-        // Trailers (rare): read and discard up to the final blank line.
+        
         while (true) {
             String trailer = readLine(in, new int[]{MAX_HEAD_BYTES});
             if (trailer == null || trailer.isEmpty()) {
@@ -205,7 +205,7 @@ public final class ResponseReader {
         return out.toByteArray();
     }
 
-    /** Reads up to CRLF (or LF). Returns null on EOF before any byte. budget[0] is decremented. */
+    
     private static String readLine(InputStream in, int[] budget) throws IOException {
         ByteArrayOutputStream line = new ByteArrayOutputStream();
         int b;

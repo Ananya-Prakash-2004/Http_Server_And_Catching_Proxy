@@ -114,7 +114,6 @@ public final class ProxyResponse {
         return toBytes(headOnly, xCache, -1);
     }
 
-    /** As above; ageSeconds >= 0 adds an Age header (replacing any stored one), -1 adds none. */
     public byte[] toBytes(boolean headOnly, String xCache, long ageSeconds) {
         return toBytes(headOnly, xCache, ageSeconds, false);
     }
