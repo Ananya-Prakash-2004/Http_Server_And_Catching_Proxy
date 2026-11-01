@@ -140,7 +140,6 @@ public class ConnectionHandler implements Runnable {
                 .body(fileHandler.readFile(file));
     }
 
-    /** Demo of an unknown-length body: 5 pieces, one every half second. */
     private HttpResponse streamDemo(HttpRequest request) throws IOException {
         int[] sent = {0};
         HttpResponse.ChunkSource source = () -> {
@@ -157,7 +156,7 @@ public class ConnectionHandler implements Runnable {
             return ("Chunk " + sent[0] + " of 5\n").getBytes(StandardCharsets.UTF_8);
         };
 
-        // HTTP/1.0 clients can't decode chunked, so gather the pieces and send a normal body
+        
         if (request.getVersion().equals("HTTP/1.0")) {
             ByteArrayOutputStream all = new ByteArrayOutputStream();
             byte[] part;

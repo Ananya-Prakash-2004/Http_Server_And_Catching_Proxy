@@ -14,7 +14,7 @@ import java.util.Map;
 
 public class HttpResponse {
 
-    /** Produces a body piece by piece when the total size isn't known up front. Returns null when done. */
+   
     public interface ChunkSource {
         byte[] next() throws IOException;
     }
@@ -44,7 +44,7 @@ public class HttpResponse {
         return this;
     }
 
-    /** Send the body with Transfer-Encoding: chunked, pulling pieces from the source. */
+    
     public HttpResponse chunked(ChunkSource source) {
         this.chunkSource = source;
         return this;
@@ -96,7 +96,7 @@ public class HttpResponse {
 
         if (includeBody) {
             if (isChunked) {
-                out.flush(); // get the headers out before the first (possibly slow) chunk
+                out.flush(); 
                 writeChunks(out);
             } else if (bodyAllowed && body.length > 0) {
                 out.write(body);

@@ -3,9 +3,9 @@ package httpserver;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Unit tests for CacheControl parsing and CachePolicy, using a fixed clock. Run: java -cp out httpserver.CachePolicyTest */
+
 public class CachePolicyTest {
-    static final long NOW = 1_800_000_000_000L; // fixed "current time" in ms
+    static final long NOW = 1_800_000_000_000L; 
 
     static void check(boolean condition, String message) {
         if (!condition) {

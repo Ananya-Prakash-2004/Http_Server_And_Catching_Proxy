@@ -10,11 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * End-to-end test: starts TestOrigin and the proxy inside this JVM and checks, request by
- * request, whether the proxy answered from its cache (X-Cache: HIT) or went to the origin.
- * Run: java -cp out httpserver.ProxyCacheTest
- */
+
 public class ProxyCacheTest {
     static int passed = 0;
     static int failed = 0;
@@ -42,7 +38,7 @@ public class ProxyCacheTest {
         }
     }
 
-    /** URL of the test origin; kv = alternating parameter names and values. */
+    
     static String url(String path, String... kv) throws IOException {
         StringBuilder sb = new StringBuilder("http://localhost:" + originPort + "/" + path);
         for (int i = 0; i < kv.length; i += 2) {
@@ -81,7 +77,7 @@ public class ProxyCacheTest {
         return send(proxyPort, "GET", url, extraHeaders);
     }
 
-    /** Two plain GETs: expect the given X-Cache values and number of origin contacts. */
+    
     static void twice(String name, String url, String first, String second, int originHits) throws IOException {
         int before = origin.requestCount();
         Resp a = get(url);
@@ -92,7 +88,7 @@ public class ProxyCacheTest {
     }
 
 
-    /** Reads exactly one response from a persistent connection (framed by Content-Length). Null at EOF. */
+    
     static Resp readOne(InputStream in, boolean headRequest) throws IOException {
         ByteArrayOutputStream head = new ByteArrayOutputStream();
         int[] pattern = {'\r', '\n', '\r', '\n'};
@@ -142,7 +138,7 @@ public class ProxyCacheTest {
     }
 
     static void originConnectionTests() throws Exception {
-        // 20 sequential cache misses: the proxy should keep using one connection to the origin
+        
         int c0 = origin.connectionCount();
         int r0 = origin.requestCount();
         boolean allOk = true;
@@ -155,7 +151,7 @@ public class ProxyCacheTest {
         check("...over a reused connection (origin accepted at most 3 connections, not 20)",
                 origin.connectionCount() - c0 <= 3);
 
-        // origin that answers "Connection: close": its connection must not be pooled
+        
         c0 = origin.connectionCount();
         allOk = true;
         for (int i = 0; i < 3; i++) {
@@ -165,7 +161,7 @@ public class ProxyCacheTest {
         check("origin saying Connection: close is respected (a new connection for each of the next requests)",
                 allOk && origin.connectionCount() - c0 >= 2);
 
-        // origin that announces keep-alive but hangs up: the stale pooled connection must be retried invisibly
+        
         allOk = true;
         for (int i = 0; i < 4; i++) {
             Resp r = get(url("dropping" + i, "cc", "no-store", "drop", "1"));
@@ -173,7 +169,7 @@ public class ProxyCacheTest {
         }
         check("a pooled connection the origin has silently closed is retried on a fresh one (no 502 for the client)", allOk);
 
-        // origin speaking HTTP/1.0 with no length: the body ends when the origin closes
+        
         ServerSocket old = new ServerSocket(0);
         int oldPort = old.getLocalPort();
         Thread ot = new Thread(() -> {
@@ -219,7 +215,7 @@ public class ProxyCacheTest {
                         "keep-alive".equals(r2.headers.get("connection")) && r2.body.equals(r1.body)
                                 && !r1.body.isEmpty());
 
-                // mixed framing on the same connection: HEAD (no body), conditional (304), then a full GET
+                
                 s.getOutputStream().write(raw("HEAD", ka, "HTTP/1.1"));
                 Resp head1 = readOne(s.getInputStream(), true);
                 s.getOutputStream().write(raw("GET", ka, "HTTP/1.1", "If-None-Match: \"v1\""));
@@ -232,7 +228,7 @@ public class ProxyCacheTest {
             }
 
             try (Socket s = open()) {
-                // two requests sent back to back in one write (pipelining)
+                
                 byte[] one = raw("GET", ka, "HTTP/1.1");
                 byte[] both = new byte[one.length * 2];
                 System.arraycopy(one, 0, both, 0, one.length);
@@ -278,7 +274,7 @@ public class ProxyCacheTest {
                         e != null && e.status == 405 && s.getInputStream().read() == -1);
             }
             try (Socket s = open()) {
-                // the 100th request on a connection is answered with Connection: close, like the team's server
+                
                 Resp last = null;
                 boolean allKeepAlive = true;
                 for (int i = 1; i <= 100; i++) {
